@@ -23,19 +23,55 @@ int main() {
     exact.add(generic); exact.add(generic); exact.add(nul); exact.add(nul);
     assert(exact.candidate(generic) && exact.candidate(nul));
     std::array<Partition<RawEvent>,PARTS> raw;
-    std::array<Partition<RawClick>,PARTS> raw_clicks;
     std::array<Partition<sprint::Event>,PARTS> events;
     std::array<Partition<sprint::Click>,PARTS> clicks;
     // Later valid copy and earlier invalid copy name different people and arrive in reverse order.
     raw[0].add({{repeated_id,2,1000,3000,0,500},{repeated_id,0,1000,1000,0,INVALID}});
-    dedup<true>(raw,raw_clicks,8,events,clicks);
+    sprint::dedup(raw,8,events);
     for (auto& part:events) assert(part.flatten().empty());
     // Equal-ingest conflicting copies must still invoke the existing arbitrary-shape fallback.
     raw[0].add({{repeated_id,1,1000,1000,0,100},{repeated_id,2,1000,1000,0,100}});
     bool unsupported=false;
-    try { dedup<true>(raw,raw_clicks,8,events,clicks); }
+    try { sprint::dedup(raw,8,events); }
     catch (const Unsupported&) { unsupported=true; }
     assert(unsupported);
+    // Thousands of cross-file quoted/unquoted copies still count each campaign/session once.
+    char temporary[]="/tmp/shopping-click-copies.XXXXXX";
+    assert(mkdtemp(temporary)); fs::path folder(temporary);
+    Keys user_keys('u'),click_keys('k'),event_keys('e'); People people(user_keys);
+    people.join(user_keys.get("uA"),user_keys.get("uB")); people.finish();
+    FlatIds product_ids,campaign_ids; campaign_ids.insert("c_1",1); campaign_ids.insert("c_2",2);
+    Lookup product_lookup(product_ids,"p"),campaign_lookup(campaign_ids,"c_");
+    for (unsigned file=0;file<12;++file) {
+        std::ofstream out(folder/(std::to_string(file)+".csv"));
+        out<<"click_id,user_id,campaign_id,ts\n";
+        for (unsigned copy=0;copy<300;++copy) {
+            out<<(copy%2 ? "\"kA\",\"uB\",\"c_2\",\"2028-02-29T00:00:00Z\"\n" :
+                              "kA,uB,c_2,2028-02-29T00:00:00Z\n");
+            out<<"kZ,uA,c_1,2028-02-29T00:00:00Z\n";
+        }
+        out<<"kBad,uA,c_missing,2028-02-29T00:00:00Z\n";
+    }
+    auto maps=map_files(files(folder)); int64_t midnight=0;
+    assert(timestamp("2028-02-29T00:00:00Z",midnight));
+    parse<false>(maps,8,people,click_keys,user_keys,product_lookup,campaign_lookup,
+                 midnight,midnight+DAY,raw,clicks);
+    size_t parsed=0;
+    for (auto& part:clicks) {
+        auto rows=part.flatten(); parsed+=rows.size();
+        if (rows.empty()) continue;
+        assert(rows.size()==7200);
+        for (const auto& row:rows) assert(row.user==user_keys.get("uA"));
+        std::sort(rows.begin(),rows.end(),[&](const auto& a,const auto& b) {
+            return a.ts==b.ts ? click_keys.less(b.id,a.id) : a.ts<b.ts;
+        });
+        std::vector<Stats> stats(3); std::vector<size_t> covered(3);
+        attribute(std::vector<Session>{{midnight,100},{midnight+GAP+1,0}},rows.data(),rows.size(),
+                  day_of(midnight),1,stats,covered);
+        assert(stats[1].sessions==0 && stats[2].sessions==2 && stats[2].revenue==100);
+        assert(stats[1].assisted==2 && stats[2].assisted==2);
+    }
+    assert(parsed==7200); fs::remove_all(folder);
     FlatIds catalog; catalog.insert("p1",7); catalog.insert("p01",9); catalog.insert("p500000000",11);
     Lookup lookup(catalog,"p");
     assert(lookup.get("p1",0)==7 && lookup.get("p01",0)==9);

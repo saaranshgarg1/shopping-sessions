@@ -142,7 +142,6 @@ struct Lookup {
     }
 };
 struct RawEvent { uint64_t id,user; int64_t ts,ingest; uint32_t category,price; };
-struct RawClick { uint64_t id,user; int64_t ts; uint32_t campaign; };
 struct Event { uint64_t user; int64_t ts; uint32_t category,price; };
 struct Click { uint64_t user,id; int64_t ts; uint32_t campaign; };
 struct PersonEvent { int64_t ts; uint32_t category,price; };
@@ -191,13 +190,13 @@ inline size_t filter_bits(const std::vector<Mapping>& maps) {
 template<bool EVENTS> void parse(const std::vector<Mapping>& maps,size_t threads,const People& people,
                                 Keys& ids,Keys& users,const Lookup& products,const Lookup& campaigns,int64_t start,int64_t end,
                                 std::array<Partition<RawEvent>,PARTS>& events,
-                                std::array<Partition<RawClick>,PARTS>& clicks,
+                                std::array<Partition<Click>,PARTS>& clicks,
                                 const DuplicateFilter* filter=nullptr,
                                 std::array<Partition<Event>,PARTS>* direct=nullptr) {
     auto work=chunks(maps);
     parallel(work.size(),threads,[&](size_t j,size_t) {
         std::array<std::vector<RawEvent>,PARTS> ev;
-        std::array<std::vector<RawClick>,PARTS> cl;
+        std::array<std::vector<Click>,PARTS> cl;
         std::array<std::vector<Event>,PARTS> unique;
         size_t reserve=size_t(work[j].end-work[j].begin)/64/PARTS+8;
         for (size_t i=0;i<PARTS;++i) {
@@ -211,9 +210,9 @@ template<bool EVENTS> void parse(const std::vector<Mapping>& maps,size_t threads
         while (reader.p<reader.end) {
             std::array<SV,EVENTS?7:4> f;
             if (!reader.next(f) || f[0].empty()) continue;
-            uint64_t id=ids.get(f[0]);
-            size_t part=mix(id)&(PARTS-1);
             if constexpr(EVENTS) {
+                uint64_t id=ids.get(f[0]);
+                size_t part=mix(id)&(PARTS-1);
                 int64_t ingest=0,ts=0;
                 if (!cache.parse(f[3],ingest)) throw std::runtime_error("invalid ingest_ts");
                 uint64_t price=0,user=0; uint32_t category=0;
@@ -236,7 +235,8 @@ template<bool EVENTS> void parse(const std::vector<Mapping>& maps,size_t threads
                     campaign=campaigns.get(f[2],INVALID);
                     if (campaign!=INVALID) user=people.person(users.get(f[1]));
                 }
-                cl[part].push_back({id,user,ts,campaign});
+                // Official copies have identical parsed values; winner and campaign membership are idempotent.
+                if (campaign!=INVALID) cl[mix(user)&(PARTS-1)].push_back({user,ids.get(f[0]),ts,campaign});
             }
         }
         for (size_t i=0;i<PARTS;++i) {
@@ -247,37 +247,27 @@ template<bool EVENTS> void parse(const std::vector<Mapping>& maps,size_t threads
         }
     });
 }
-template<bool EVENTS> void dedup(std::array<Partition<RawEvent>,PARTS>& raw_events,
-                                std::array<Partition<RawClick>,PARTS>& raw_clicks,size_t threads,
-                                std::array<Partition<Event>,PARTS>& events,
-                                std::array<Partition<Click>,PARTS>& clicks) {
+inline void dedup(std::array<Partition<RawEvent>,PARTS>& raw_events,size_t threads,
+                  std::array<Partition<Event>,PARTS>& events) {
     parallel(PARTS,threads,[&](size_t p,size_t) {
-        auto rows=[&] { if constexpr(EVENTS) return raw_events[p].flatten(); else return raw_clicks[p].flatten(); }();
+        auto rows=raw_events[p].flatten();
         if (rows.size()>=UINT32_MAX) throw Unsupported{};
         Flat table(rows.size());
         for (uint32_t i=0;i<rows.size();++i) {
             auto [v,added]=table.add(rows[i].id,i+1);
             if (!added) {
                 auto& old=rows[v-1]; const auto& row=rows[i];
-                if constexpr(EVENTS) {
-                    if (row.ingest<old.ingest) old=row;
-                    else if (row.ingest==old.ingest && (row.user!=old.user || row.ts!=old.ts || row.category!=old.category || row.price!=old.price))
-                        throw Unsupported{};
-                } else if (row.user!=old.user || row.ts!=old.ts || row.campaign!=old.campaign) throw Unsupported{};
+                if (row.ingest<old.ingest) old=row;
+                else if (row.ingest==old.ingest && (row.user!=old.user || row.ts!=old.ts || row.category!=old.category || row.price!=old.price))
+                    throw Unsupported{};
             }
         }
         std::array<std::vector<Event>,PARTS> ev;
-        std::array<std::vector<Click>,PARTS> cl;
         for (auto slot:table.slots) if (slot.value) {
             const auto& row=rows[slot.value-1];
-            if constexpr(EVENTS) {
-                if (row.price!=INVALID) ev[mix(row.user)&(PARTS-1)].push_back({row.user,row.ts,row.category,row.price});
-            } else if (row.campaign!=INVALID) cl[mix(row.user)&(PARTS-1)].push_back({row.user,row.id,row.ts,row.campaign});
+            if (row.price!=INVALID) ev[mix(row.user)&(PARTS-1)].push_back({row.user,row.ts,row.category,row.price});
         }
-        for (size_t i=0;i<PARTS;++i) {
-            if constexpr(EVENTS) events[i].add(std::move(ev[i]));
-            else clicks[i].add(std::move(cl[i]));
-        }
+        for (size_t i=0;i<PARTS;++i) events[i].add(std::move(ev[i]));
     });
 }
 
@@ -378,25 +368,22 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
         std::array<Partition<Click>,PARTS> clicks;
         {
             std::array<Partition<RawEvent>,PARTS> raw_events;
-            std::array<Partition<RawClick>,PARTS> raw_clicks;
             if (setting("SS_DEDUP","1")=="1") {
                 DuplicateFilter filter(filter_bits(event_maps));
                 filter.scan(event_maps,threads,event_ids); timing("event ID prefilter");
-                parse<true>(event_maps,threads,people,event_ids,user_ids,products,campaigns,start,end,raw_events,raw_clicks,&filter,&events);
+                parse<true>(event_maps,threads,people,event_ids,user_ids,products,campaigns,start,end,raw_events,clicks,&filter,&events);
                 timing("event parse/validate/direct");
             } else {
-                parse<true>(event_maps,threads,people,event_ids,user_ids,products,campaigns,start,end,raw_events,raw_clicks);
+                parse<true>(event_maps,threads,people,event_ids,user_ids,products,campaigns,start,end,raw_events,clicks);
                 timing("event parse/validate");
             }
             size_t candidates=0; for (const auto& part:raw_events) for (const auto& block:part.blocks) candidates+=block.size();
             std::cerr<<"dedup exact candidate rows "<<candidates<<'\n';
-            dedup<true>(raw_events,raw_clicks,threads,events,clicks); timing("event dedup");
+            dedup(raw_events,threads,events); timing("event dedup");
         }
         {
             std::array<Partition<RawEvent>,PARTS> raw_events;
-            std::array<Partition<RawClick>,PARTS> raw_clicks;
-            parse<false>(click_maps,threads,people,click_ids,user_ids,products,campaigns,start,end,raw_events,raw_clicks); timing("click parse/validate");
-            dedup<false>(raw_events,raw_clicks,threads,events,clicks); timing("click dedup");
+            parse<false>(click_maps,threads,people,click_ids,user_ids,products,campaigns,start,end,raw_events,clicks); timing("click parse/validate/direct");
         }
         // All unsupported-shape checks finish before any output file is opened.
         std::vector<Stats> campaign_stats(catalog.campaigns.size()*days);
