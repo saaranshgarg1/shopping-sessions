@@ -151,7 +151,7 @@ inline SV raw_id(const Raw& row) {
     if (id.front()=='"') { id.remove_prefix(1); id.remove_suffix(1); }
     return id;
 }
-struct RawPart { std::mutex mutex; std::vector<std::vector<Raw>> blocks; };
+struct RawPart { std::mutex mutex; std::vector<std::pair<size_t,std::vector<Raw>>> blocks; };
 template<size_t N> void ingest(const std::vector<Mapping>& maps,size_t threads,
                               std::array<RawPart,PARTS>& parts,const Identity& identity,
                               const Catalog& cat,int64_t start,int64_t end) {
@@ -169,7 +169,7 @@ template<size_t N> void ingest(const std::vector<Mapping>& maps,size_t threads,
                 uint64_t price=0;
                 if (f[4]=="purchase") valid=valid && digits(f[6],10000000,price) && price;
                 else valid=valid && (f[4]=="view" || f[4]=="cart");
-                if (valid && raw.ingest-raw.ts<=DAY) {
+                if (valid && !(raw.ingest>raw.ts && uint64_t(raw.ingest)-uint64_t(raw.ts)>uint64_t(DAY))) {
                     raw.user=identity.person(f[1]); raw.price=uint32_t(price);
                     if (price) raw.category=cat.products.get(f[5],0);
                 }
@@ -185,7 +185,7 @@ template<size_t N> void ingest(const std::vector<Mapping>& maps,size_t threads,
             local[(h>>32)&(PARTS-1)].push_back(raw);
         });
         for (size_t p=0;p<PARTS;++p) if (!local[p].empty()) {
-            std::lock_guard lock(parts[p].mutex); parts[p].blocks.push_back(std::move(local[p]));
+            std::lock_guard lock(parts[p].mutex); parts[p].blocks.emplace_back(j,std::move(local[p]));
         }
     });
 }
@@ -203,11 +203,14 @@ template<bool EVENTS> void dedup(std::array<RawPart,PARTS>& raw,size_t threads,
                                 std::array<Partition<Event>,PARTS>& events,
                                 std::array<Partition<Click>,PARTS>& clicks) {
     parallel(PARTS,threads,[&](size_t p,size_t) {
-        size_t count=0; for (const auto& b:raw[p].blocks) count+=b.size();
+        auto& blocks=raw[p].blocks;
+        // Equal-ingest winners and duplicate clicks retain sorted-file/chunk order.
+        std::sort(blocks.begin(),blocks.end(),[](const auto& a,const auto& b) { return a.first<b.first; });
+        size_t count=0; for (const auto& b:blocks) count+=b.second.size();
         if (!count) return;
         if (count>=UINT32_MAX) throw std::runtime_error("dedup partition exceeds 32-bit row count");
         std::vector<Raw> rows; rows.reserve(count);
-        for (auto& b:raw[p].blocks) { rows.insert(rows.end(),b.begin(),b.end()); std::vector<Raw>().swap(b); }
+        for (auto& [chunk,b]:blocks) { rows.insert(rows.end(),b.begin(),b.end()); std::vector<Raw>().swap(b); }
         raw[p].blocks.clear();
         size_t slots=1; while (slots < count+count/2) slots*=2;
         std::vector<uint32_t> table(slots,UINT32_MAX);
@@ -381,6 +384,7 @@ void write_campaigns(const fs::path& path,const std::vector<Stats>& stats,const 
     }
     pq::write(path.string(),cols);
 }
+#include "fast.hpp"
 int main(int argc,char** argv) {
     try {
         if (argc!=1 && argc!=3) throw std::runtime_error("usage: shopping-sessions [DATA_DIR OUTPUT_DIR]");
@@ -401,6 +405,7 @@ int main(int argc,char** argv) {
                 throw std::runtime_error("refusing to overwrite nonempty output " + path.string());
             fs::create_directories(path);
         }
+        if (setting("SS_BASELINE","0")!="1" && sprint::run(data,output,threads,start,end,first_day,days)) return 0;
         auto link_maps=map_files(files(data/"links"));
         Identity identity;
         for (auto chunk:chunks(link_maps)) lines(chunk,[&](SV row) {

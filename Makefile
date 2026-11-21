@@ -10,18 +10,26 @@ all: $(BUILD_DIR)/shopping-sessions
 $(BUILD_DIR):
 	mkdir -p "$@"
 
-$(BUILD_DIR)/shopping-sessions: src/main.cpp src/core.hpp src/parquet.hpp | $(BUILD_DIR)
+$(BUILD_DIR)/shopping-sessions: src/main.cpp src/core.hpp src/parquet.hpp src/fast.hpp src/decode.hpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -Isrc src/main.cpp -o "$@"
 
 $(BUILD_DIR)/core-test: tests/core_test.cpp src/core.hpp | $(BUILD_DIR)
 	$(CXX) -O2 -std=c++20 -pthread -Wall -Wextra -Isrc tests/core_test.cpp -o "$@"
 
-$(BUILD_DIR)/perf-test: tests/perf_test.cpp src/main.cpp src/core.hpp src/parquet.hpp | $(BUILD_DIR)
+$(BUILD_DIR)/perf-test: tests/perf_test.cpp src/main.cpp src/core.hpp src/parquet.hpp src/fast.hpp src/decode.hpp | $(BUILD_DIR)
 	$(CXX) -O2 -std=c++20 -pthread -Wall -Wextra -Wno-missing-field-initializers -Isrc tests/perf_test.cpp -o "$@"
 
-test: $(BUILD_DIR)/core-test $(BUILD_DIR)/perf-test
+$(BUILD_DIR)/dedup-test: tests/dedup_test.cpp src/main.cpp src/core.hpp src/parquet.hpp src/fast.hpp src/decode.hpp | $(BUILD_DIR)
+	$(CXX) -O2 -std=c++20 -pthread -Wall -Wextra -Wno-missing-field-initializers -Isrc tests/dedup_test.cpp -o "$@"
+
+$(BUILD_DIR)/decode-test: tests/decode_test.cpp src/decode.hpp src/core.hpp | $(BUILD_DIR)
+	$(CXX) -O2 -std=c++20 -pthread -Wall -Wextra -Isrc tests/decode_test.cpp -o "$@"
+
+test: $(BUILD_DIR)/core-test $(BUILD_DIR)/perf-test $(BUILD_DIR)/dedup-test $(BUILD_DIR)/decode-test
 	$(BUILD_DIR)/core-test
 	$(BUILD_DIR)/perf-test
+	$(BUILD_DIR)/dedup-test
+	$(BUILD_DIR)/decode-test
 
 $(BUILD_DIR)/parquet-probe: tests/parquet_probe.cpp src/parquet.hpp | $(BUILD_DIR)
 	$(CXX) -O2 -std=c++20 -Wall -Wextra -Isrc tests/parquet_probe.cpp -o "$@"
@@ -32,4 +40,4 @@ parquet-test: $(BUILD_DIR)/parquet-probe
 	$(PYTHON) -I tests/check_parquet.py "$$out"
 
 clean:
-	rm -f "$(BUILD_DIR)/shopping-sessions" "$(BUILD_DIR)/core-test" "$(BUILD_DIR)/perf-test" "$(BUILD_DIR)/parquet-probe"
+	rm -f "$(BUILD_DIR)/shopping-sessions" "$(BUILD_DIR)/core-test" "$(BUILD_DIR)/perf-test" "$(BUILD_DIR)/parquet-probe" "$(BUILD_DIR)/dedup-test" "$(BUILD_DIR)/decode-test"
