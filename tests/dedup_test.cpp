@@ -26,11 +26,13 @@ int main() {
     std::array<Partition<sprint::Event>,PARTS> events;
     std::array<Partition<sprint::Click>,PARTS> clicks;
     // Later valid copy and earlier invalid copy name different people and arrive in reverse order.
-    raw[0].add({{repeated_id,2,1000,3000,0,500},{repeated_id,0,1000,1000,0,INVALID}});
+    raw[0].add({{repeated_id,2,1000,"2028-03-01T00:00:00Z",0,500},
+                {repeated_id,0,0,"2028-02-29T23:59:59Z",0,INVALID}});
     sprint::dedup(raw,8,events);
     for (auto& part:events) assert(part.flatten().empty());
     // Equal-ingest conflicting copies must still invoke the existing arbitrary-shape fallback.
-    raw[0].add({{repeated_id,1,1000,1000,0,100},{repeated_id,2,1000,1000,0,100}});
+    raw[0].add({{repeated_id,1,1000,"2028-02-29T23:59:59Z",0,100},
+                {repeated_id,2,1000,"2028-02-29T23:59:59Z",0,100}});
     bool unsupported=false;
     try { sprint::dedup(raw,8,events); }
     catch (const Unsupported&) { unsupported=true; }
@@ -90,6 +92,25 @@ int main() {
     auto winners=base_events[hash("uA")&(PARTS-1)].flatten();
     assert(winners.size()==1 && winners[0].user=="uA");
     DateCache cache;
+    auto check_late=[&](SV event,SV arrival) {
+        int64_t ts=0,ingest=0;
+        assert(timestamp(event,ts) && timestamp(arrival,ingest));
+        bool expected=!(ingest>ts && uint64_t(ingest)-uint64_t(ts)>uint64_t(DAY));
+        assert(on_time(cache,event,arrival,ts)==expected);
+    };
+    check_late("2028-02-29T00:00:00Z","2028-02-29T23:59:59Z");
+    check_late("2028-02-29T23:59:59Z","2028-02-29T00:00:00Z");
+    check_late("2028-02-29T23:59:59Z","2028-03-01T23:59:59Z");
+    check_late("2028-02-29T23:59:59Z","2028-03-02T00:00:00Z");
+    check_late("2028-02-29T00:00:00+01:00","2028-02-29T23:30:00Z");
+    check_late("1835395200000","2028-02-29T23:59:59Z");
+    // Separate allocations: comparing pointers would pick the wrong calendar winner.
+    std::vector<std::string> arrivals{"2028-03-01T00:00:00Z","2028-02-29T23:59:59Z",
+                                      "2029-01-01T00:00:00Z","2028-12-31T23:59:59Z"};
+    for (const auto& a:arrivals) for (const auto& b:arrivals) {
+        int64_t x=0,y=0; assert(timestamp(a,x) && timestamp(b,y));
+        assert((std::memcmp(a.data(),b.data(),20)<0)==(x<y));
+    }
     for (SV value:{"2028-02-29T23:59:59Z","2027-02-29T23:59:59Z","9223372036854775807"}) {
         int64_t fast=0,slow=0; bool ok=timestamp(value,slow);
         assert(cache.parse(value,fast)==ok && (!ok || fast==slow));

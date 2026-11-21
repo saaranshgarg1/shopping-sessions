@@ -141,7 +141,18 @@ struct Lookup {
         return generic.get(id,missing);
     }
 };
-struct RawEvent { uint64_t id,user; int64_t ts,ingest; uint32_t category,price; };
+inline bool f1(SV s) {
+    return s.size()==20 && s[4]=='-' && s[7]=='-' && s[10]=='T' &&
+        s[13]==':' && s[16]==':' && s[19]=='Z';
+}
+inline bool on_time(DateCache& cache,SV ts_text,SV ingest,int64_t ts) {
+    // Valid F1 UTC values on the same date differ by strictly less than 24 hours.
+    if (f1(ts_text) && f1(ingest) && std::memcmp(ts_text.data(),ingest.data(),10)==0) return true;
+    int64_t arrival=0;
+    if (!cache.parse(ingest,arrival)) throw std::runtime_error("invalid ingest_ts");
+    return !(arrival>ts && uint64_t(arrival)-uint64_t(ts)>uint64_t(DAY));
+}
+struct RawEvent { uint64_t id,user; int64_t ts; const char* ingest; uint32_t category,price; };
 struct Event { uint64_t user; int64_t ts; uint32_t category,price; };
 struct Click { uint64_t user,id; int64_t ts; uint32_t campaign; };
 struct PersonEvent { int64_t ts; uint32_t category,price; };
@@ -213,22 +224,23 @@ template<bool EVENTS> void parse(const std::vector<Mapping>& maps,size_t threads
             if constexpr(EVENTS) {
                 uint64_t id=ids.get(f[0]);
                 size_t part=mix(id)&(PARTS-1);
-                int64_t ingest=0,ts=0;
-                if (!cache.parse(f[3],ingest)) throw std::runtime_error("invalid ingest_ts");
+                int64_t ts=0;
+                // shortcut: ingest is guaranteed valid F1; non-F1 inputs restart the generic engine.
+                if (!f1(f[3])) throw Unsupported{};
                 uint64_t price=0,user=0; uint32_t category=0;
                 bool valid=!f[1].empty() && !f[5].empty() && cache.parse(f[2],ts) && ts>=start && ts<end;
                 if (valid) {
                     if (f[4]=="purchase") valid=digits(f[6],10000000,price) && price;
                     else valid=f[4]=="view" || f[4]=="cart";
                 }
-                if (valid) valid=!(ingest>ts && uint64_t(ingest)-uint64_t(ts)>uint64_t(DAY));
+                if (valid) valid=on_time(cache,f[2],f[3],ts);
                 if (valid) {
                     user=people.person(users.get(f[1]));
                     if (price) category=products.get(f[5],0);
                 }
                 if (filter && !filter->candidate(id)) {
                     if (valid) unique[mix(user)&(PARTS-1)].push_back({user,ts,category,uint32_t(price)});
-                } else ev[part].push_back({id,user,ts,ingest,category,valid ? uint32_t(price) : INVALID});
+                } else ev[part].push_back({id,user,ts,f[3].data(),category,valid ? uint32_t(price) : INVALID});
             } else {
                 int64_t ts=0; uint64_t user=0; uint32_t campaign=INVALID;
                 if (!f[1].empty() && cache.parse(f[3],ts) && ts>=start-WEEK && ts<end) {
@@ -257,8 +269,10 @@ inline void dedup(std::array<Partition<RawEvent>,PARTS>& raw_events,size_t threa
             auto [v,added]=table.add(rows[i].id,i+1);
             if (!added) {
                 auto& old=rows[v-1]; const auto& row=rows[i];
-                if (row.ingest<old.ingest) old=row;
-                else if (row.ingest==old.ingest && (row.user!=old.user || row.ts!=old.ts || row.category!=old.category || row.price!=old.price))
+                // Fixed-width valid F1 bytes sort chronologically, even when event ts is invalid.
+                int order=std::memcmp(row.ingest,old.ingest,20);
+                if (order<0) old=row;
+                else if (!order && (row.user!=old.user || row.ts!=old.ts || row.category!=old.category || row.price!=old.price))
                     throw Unsupported{};
             }
         }
