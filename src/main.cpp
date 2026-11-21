@@ -95,6 +95,7 @@ struct Identity {
     std::vector<uint32_t> parent;
     std::vector<uint8_t> rank;
     std::vector<SV> names;
+    FlatIds lookup;
     uint32_t add(SV id) {
         auto [it,inserted]=ids.try_emplace(id,parent.size());
         if (inserted) { parent.push_back(parent.size()); rank.push_back(0); names.push_back(id); }
@@ -111,11 +112,15 @@ struct Identity {
         parent[y]=x; names[x]=std::min(names[x],names[y]);
         if (rank[x]==rank[y]) ++rank[x];
     }
-    void finish() { for (auto& [id,index]:ids) index=root(index); }
-    SV person(SV id) const { auto it=ids.find(id); return it==ids.end() ? id : names[it->second]; }
+    void finish() {
+        lookup.reserve(ids.size());
+        for (auto& [id,index]:ids) { index=root(index); lookup.insert(id,index); }
+        ids.clear(); ids.rehash(0);
+    }
+    SV person(SV id) const { auto i=lookup.get(id); return i==UINT32_MAX ? id : names[i]; }
 };
 struct Catalog {
-    std::unordered_map<SV,uint32_t,Hasher> products,campaign_ids;
+    FlatIds products,campaign_ids;
     std::vector<SV> categories{"unknown"}, campaigns{"organic"},channels{"organic"};
     void products_from(const Mapping& map) {
         std::unordered_map<SV,uint32_t,Hasher> cats{{"unknown",0}};
@@ -124,7 +129,7 @@ struct Catalog {
         lines({nl+1,map.data+map.size},[&](SV row) {
             std::array<SV,2> f; if (!csv(row,f)) throw std::runtime_error("malformed products row");
             auto [it,added]=cats.try_emplace(f[1],categories.size()); if (added) categories.push_back(f[1]);
-            products.emplace(f[0],it->second);
+            products.insert(f[0],it->second);
         });
     }
     void campaigns_from(const Mapping& map) {
@@ -132,11 +137,14 @@ struct Catalog {
         if (!nl) return;
         lines({nl+1,map.data+map.size},[&](SV row) {
             std::array<SV,2> f; if (!csv(row,f)) throw std::runtime_error("malformed campaigns row");
-            campaign_ids.emplace(f[0],campaigns.size()); campaigns.push_back(f[0]); channels.push_back(f[1]);
+            campaign_ids.insert(f[0],campaigns.size()); campaigns.push_back(f[0]); channels.push_back(f[1]);
         });
     }
 };
-struct Raw { const char* line; int64_t ingest; uint32_t length,fingerprint; };
+struct Raw {
+    const char* line; int64_t ingest,ts; SV user;
+    uint32_t length,fingerprint,category,price;
+};
 inline SV raw_id(const Raw& row) {
     const char* end=static_cast<const char*>(std::memchr(row.line,',',row.length));
     SV id(row.line,end-row.line);
@@ -145,17 +153,36 @@ inline SV raw_id(const Raw& row) {
 }
 struct RawPart { std::mutex mutex; std::vector<std::vector<Raw>> blocks; };
 template<size_t N> void ingest(const std::vector<Mapping>& maps,size_t threads,
-                              std::array<RawPart,PARTS>& parts) {
+                              std::array<RawPart,PARTS>& parts,const Identity& identity,
+                              const Catalog& cat,int64_t start,int64_t end) {
     auto work=chunks(maps);
     parallel(work.size(),threads,[&](size_t j,size_t) {
         std::array<std::vector<Raw>,PARTS> local;
         lines(work[j],[&](SV row) {
             std::array<SV,N> f; if (!csv(row,f) || f[0].empty()) return;
             if (row.size()>UINT32_MAX) throw std::runtime_error("CSV row exceeds 4 GiB");
-            int64_t time=0;
-            if constexpr(N==7) { if (!timestamp(f[3],time)) throw std::runtime_error("invalid ingest_ts"); }
-            uint64_t h=hash(f[0]);
-            local[(h>>32)&(PARTS-1)].push_back({row.data(),time,uint32_t(row.size()),uint32_t(h)});
+            Raw raw{}; raw.line=row.data(); raw.length=uint32_t(row.size());
+            if constexpr(N==7) {
+                if (!timestamp_fast(f[3],raw.ingest)) throw std::runtime_error("invalid ingest_ts");
+                bool valid=!f[1].empty() && !f[5].empty() && timestamp_fast(f[2],raw.ts)
+                           && raw.ts>=start && raw.ts<end;
+                uint64_t price=0;
+                if (f[4]=="purchase") valid=valid && digits(f[6],10000000,price) && price;
+                else valid=valid && (f[4]=="view" || f[4]=="cart");
+                if (valid && raw.ingest-raw.ts<=DAY) {
+                    raw.user=identity.person(f[1]); raw.price=uint32_t(price);
+                    if (price) raw.category=cat.products.get(f[5],0);
+                }
+            } else {
+                auto campaign=cat.campaign_ids.get(f[2]);
+                if (!f[1].empty() && campaign!=UINT32_MAX && timestamp_fast(f[3],raw.ts)
+                    && raw.ts>=start-WEEK && raw.ts<end) {
+                    raw.user=identity.person(f[1]); raw.category=campaign;
+                }
+            }
+            // Invalid copies still compete in global dedup; an earliest invalid copy poisons the ID.
+            uint64_t h=hash(f[0]); raw.fingerprint=uint32_t(h);
+            local[(h>>32)&(PARTS-1)].push_back(raw);
         });
         for (size_t p=0;p<PARTS;++p) if (!local[p].empty()) {
             std::lock_guard lock(parts[p].mutex); parts[p].blocks.push_back(std::move(local[p]));
@@ -173,7 +200,6 @@ template<class T> struct Partition {
     }
 };
 template<bool EVENTS> void dedup(std::array<RawPart,PARTS>& raw,size_t threads,
-                                const Identity& identity,const Catalog& cat,int64_t start,int64_t end,
                                 std::array<Partition<Event>,PARTS>& events,
                                 std::array<Partition<Click>,PARTS>& clicks) {
     parallel(PARTS,threads,[&](size_t p,size_t) {
@@ -198,25 +224,10 @@ template<bool EVENTS> void dedup(std::array<RawPart,PARTS>& raw,size_t threads,
         std::array<std::vector<Click>,PARTS> local_clicks;
         for (uint32_t index:table) {
             if (index==UINT32_MAX) continue;
-            auto& row=rows[index]; int64_t time;
-            if constexpr(EVENTS) {
-                std::array<SV,7> f; csv(SV(row.line,row.length),f);
-                if (f[1].empty() || f[5].empty() || !timestamp(f[2],time) || time<start || time>=end) continue;
-                uint64_t price=0;
-                if (f[4]=="purchase") { if (!digits(f[6],10000000,price) || !price) continue; }
-                else if (f[4]!="view" && f[4]!="cart") continue;
-                if (row.ingest-time>DAY) continue;
-                uint32_t category=0;
-                if (price) { auto it=cat.products.find(f[5]); if (it!=cat.products.end()) category=it->second; }
-                SV user=identity.person(f[1]);
-                local_events[hash(user)&(PARTS-1)].push_back({user,time,category,uint32_t(price)});
-            } else {
-                std::array<SV,4> f; csv(SV(row.line,row.length),f);
-                if (f[1].empty() || !timestamp(f[3],time) || time<start-WEEK || time>=end) continue;
-                auto campaign=cat.campaign_ids.find(f[2]); if (campaign==cat.campaign_ids.end()) continue;
-                SV user=identity.person(f[1]);
-                local_clicks[hash(user)&(PARTS-1)].push_back({user,f[0],time,campaign->second});
-            }
+            auto& row=rows[index]; if (row.user.empty()) continue;
+            size_t part=hash(row.user)&(PARTS-1);
+            if constexpr(EVENTS) local_events[part].push_back({row.user,row.ts,row.category,row.price});
+            else local_clicks[part].push_back({row.user,raw_id(row),row.ts,row.category});
         }
         for (size_t i=0;i<PARTS;++i) {
             events[i].add(std::move(local_events[i])); clicks[i].add(std::move(local_clicks[i]));
@@ -226,12 +237,38 @@ template<bool EVENTS> void dedup(std::array<RawPart,PARTS>& raw,size_t threads,
 struct UserRow { SV user,category; int32_t day; int64_t sessions,events,revenue; bool has_category; };
 struct Result { std::vector<UserRow> users; std::vector<Stats> campaigns; };
 
-Result aggregate(Partition<Event>& ep,Partition<Click>& cp,const Catalog& catalog,int64_t first_day,size_t days) {
-    auto events=ep.flatten(); auto clicks=cp.flatten();
-    std::sort(events.begin(),events.end(),[](const Event& a,const Event& b) {
+struct CompactEvent { uint32_t ts,user,category,price; };
+struct CompactClick { uint32_t user,campaign; int64_t ts; SV id; };
+
+void sort_events(std::vector<CompactEvent>& rows) {
+    auto key=[](const CompactEvent& r) { return uint64_t(r.user)<<32 | r.ts; };
+    if (rows.size()<4096) {
+        std::sort(rows.begin(),rows.end(),[&](const auto& a,const auto& b) { return key(a)<key(b); });
+        return;
+    }
+    std::vector<CompactEvent> temp(rows.size());
+    constexpr size_t B=2048;
+    std::array<size_t,B> counts;
+    for (unsigned shift=0;shift<64;shift+=11) {
+        counts.fill(0);
+        for (const auto& r:rows) ++counts[(key(r)>>shift)&(B-1)];
+        size_t total=0;
+        for (auto& c:counts) { size_t n=c; c=total; total+=n; }
+        for (const auto& r:rows) temp[counts[(key(r)>>shift)&(B-1)]++]=r;
+        rows.swap(temp);
+    }
+}
+void sort_events(std::vector<Event>& rows) {
+    std::sort(rows.begin(),rows.end(),[](const Event& a,const Event& b) {
         return a.user==b.user ? a.ts<b.ts : a.user<b.user;
     });
-    std::sort(clicks.begin(),clicks.end(),[](const Click& a,const Click& b) {
+}
+
+template<class E,class C,class Name>
+Result aggregate_rows(std::vector<E> events,std::vector<C> clicks,const Catalog& catalog,
+                      int64_t first_day,size_t days,int64_t offset,Name name) {
+    sort_events(events);
+    std::sort(clicks.begin(),clicks.end(),[](const C& a,const C& b) {
         if (a.user!=b.user) return a.user<b.user;
         if (a.ts!=b.ts) return a.ts<b.ts;
         return a.id>b.id; // Smallest ID is last at a tied timestamp.
@@ -243,7 +280,7 @@ Result aggregate(Partition<Event>& ep,Partition<Click>& cp,const Catalog& catalo
     std::vector<Session> sessions;
     size_t ci=0;
     for (size_t begin=0;begin<events.size();) {
-        size_t finish=begin+1; SV user=events[begin].user;
+        size_t finish=begin+1; auto user=events[begin].user;
         while (finish<events.size() && events[finish].user==user) ++finish;
         sessions.clear(); touched.clear();
         int64_t previous=0; UserRow daily{};
@@ -261,15 +298,15 @@ Result aggregate(Partition<Event>& ep,Partition<Click>& cp,const Catalog& catalo
             result.users.push_back(daily); touched.clear();
         };
         for (size_t i=begin;i<finish;++i) {
-            const auto& event=events[i];
-            if (i==begin || event.ts-previous>GAP) {
-                int32_t day=day_of(event.ts);
+            const auto& event=events[i]; int64_t ts=offset+event.ts;
+            if (i==begin || ts-previous>GAP) {
+                int32_t day=day_of(ts);
                 if (i==begin || daily.day!=day) {
-                    emit(); daily={user,{},day,0,0,0,false};
+                    emit(); daily={name(user),{},day,0,0,0,false};
                 }
-                ++daily.sessions; sessions.push_back({event.ts,0});
+                ++daily.sessions; sessions.push_back({ts,0});
             }
-            previous=event.ts; ++daily.events;
+            previous=ts; ++daily.events;
             daily.revenue+=event.price; sessions.back().revenue+=event.price;
             if (event.price) {
                 if (!category_revenue[event.category]) touched.push_back(event.category);
@@ -283,6 +320,29 @@ Result aggregate(Partition<Event>& ep,Partition<Click>& cp,const Catalog& catalo
         begin=finish;
     }
     return result;
+}
+
+Result aggregate(Partition<Event>& ep,Partition<Click>& cp,const Catalog& catalog,
+                 int64_t first_day,size_t days,int64_t start,int64_t end) {
+    auto events=ep.flatten(); auto clicks=cp.flatten();
+    // shortcut: 32-bit relative event time; use the full-width path for wider windows.
+    if (end-start>UINT32_MAX || events.size()+clicks.size()>=UINT32_MAX)
+        return aggregate_rows(std::move(events),std::move(clicks),catalog,first_day,days,0,[](SV id) { return id; });
+    FlatIds people; std::vector<SV> names;
+    people.reserve(std::min<size_t>(events.size()+clicks.size(),65536));
+    auto intern=[&](SV id) {
+        auto [index,added]=people.insert(id,names.size());
+        if (added) names.push_back(id);
+        return index;
+    };
+    std::vector<CompactEvent> compact_events; compact_events.reserve(events.size());
+    for (const auto& r:events) compact_events.push_back({uint32_t(r.ts-start),intern(r.user),r.category,r.price});
+    std::vector<Event>().swap(events);
+    std::vector<CompactClick> compact_clicks; compact_clicks.reserve(clicks.size());
+    for (const auto& r:clicks) compact_clicks.push_back({intern(r.user),r.campaign,r.ts,r.id});
+    std::vector<Click>().swap(clicks);
+    return aggregate_rows(std::move(compact_events),std::move(compact_clicks),catalog,first_day,days,start,
+                          [&](uint32_t id) { return names[id]; });
 }
 
 std::string setting(const char* name,const char* fallback) { auto v=std::getenv(name); return v ? v : fallback; }
@@ -355,18 +415,18 @@ int main(int argc,char** argv) {
         std::array<Partition<Click>,PARTS> clicks;
         {
             std::array<RawPart,PARTS> raw;
-            ingest<7>(event_maps,threads,raw); timing("event parse");
-            dedup<true>(raw,threads,identity,catalog,start,end,events,clicks); timing("event dedup/validate");
+            ingest<7>(event_maps,threads,raw,identity,catalog,start,end); timing("event parse");
+            dedup<true>(raw,threads,events,clicks); timing("event dedup/validate");
         }
         {
             std::array<RawPart,PARTS> raw;
-            ingest<4>(click_maps,threads,raw); timing("click parse");
-            dedup<false>(raw,threads,identity,catalog,start,end,events,clicks); timing("click dedup/validate");
+            ingest<4>(click_maps,threads,raw,identity,catalog,start,end); timing("click parse");
+            dedup<false>(raw,threads,events,clicks); timing("click dedup/validate");
         }
         std::vector<Stats> campaign_stats(catalog.campaigns.size()*days);
         std::mutex campaign_mutex;
         parallel(PARTS,threads,[&](size_t part,size_t) {
-            auto result=aggregate(events[part],clicks[part],catalog,first_day,days);
+            auto result=aggregate(events[part],clicks[part],catalog,first_day,days,start,end);
             if (!result.users.empty()) write_users(output/"user_daily"/("part-"+std::to_string(part)+".parquet"),result.users);
             std::lock_guard lock(campaign_mutex);
             for (size_t i=0;i<campaign_stats.size();++i) campaign_stats[i]+=result.campaigns[i];

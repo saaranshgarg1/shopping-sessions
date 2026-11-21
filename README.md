@@ -27,17 +27,17 @@ Mounted output and scratch folders must be writable by uid 1000. Docker download
 
 1. Memory-map every input CSV file. Parse only LF as a line ending; strip whole-field quotes, never trim or normalize values. Work is divided at row boundaries into 4 MiB chunks for balanced parallel ingest.
 2. Resolve all valid links with path-compressed union-find, keeping the byte-wise smallest identity, including IDs with no activity. Read-only string views refer to mapped input for the entire run.
-3. Hash-partition raw events by event ID. Exact equality resolves every hash collision. Keep the earliest ingest before validating any event. Click IDs receive the same exact global dedup treatment.
-4. Validate ASCII digits, Gregorian calendar, timezone offset, windows, purchase amount, type, product ID and late-arrival boundary. Hash-partition surviving rows by canonical person, not original user ID.
-5. Sort each person partition by identity and timestamp. Merge equal timestamps; split only at a gap greater than 30 minutes. Assign all session activity to the UTC start day.
+3. Compute validation while scanning each chunk once, retaining invalid copies. Hash-partition all parsed rows by event ID and use full byte equality for collisions. Only after earliest-ingest dedup discard invalid winners, so later valid copies cannot rescue them. Click IDs receive the same exact global dedup treatment.
+4. Validate ASCII digits, Gregorian calendar, timezone offset, windows, purchase amount, type, product ID and late-arrival boundary. Cached date prefixes are accepted only after full calendar validation; arbitrary timestamp forms use the generic parser. Immutable flat identity/catalog tables preserve exact strings. Hash-partition surviving rows by canonical person, not original user ID.
+5. Intern canonical people within each partition and radix-sort compact events by numeric person and timestamp. Windows wider than 32-bit relative milliseconds use full-width comparison sorting. Equal timestamps share a session; split only at a gap greater than 30 minutes. Assign all session activity to the UTC start day.
 6. Scan time-sorted clicks for exact last-click credit, with smallest byte-wise click ID winning ties. Assist counting uses per-campaign interval unions over sorted session indices. It never materializes a session-by-click or session-by-campaign join, including shared-device and whale people.
 7. Reduce integer aggregates and write standard uncompressed PLAIN Parquet with native DATE, UTF-8 strings, nullable top category, and 64-bit metrics. Each user hash partition produces an independent file. Row order is irrelevant.
 
-Event processing uses compact 24-byte raw records and 32-byte surviving records on amd64. Dedup tables store 32-bit row indices, not copied keys. All decisions use full input values; no probabilistic dedup, assumptions about ID naming, fixed window, seed-specific code, or approximate arithmetic.
+Event processing uses 56-byte fused raw records, 32-byte surviving records before interning, and 16-byte event/32-byte click sort records on amd64. Dedup tables store 32-bit row indices, not copied keys. All decisions use full input values; no probabilistic dedup, assumptions about ID naming, fixed window, seed-specific code, or approximate arithmetic.
 
 ## Verification
 
-`make test` runs parser/calendar boundaries and 1,000 interval-union versus naive attribution cases. `make parquet-test PYTHON=/path/to/pyarrow-venv/bin/python` builds the native Parquet probe and checks schema, values, empty/all-null columns, definition-level padding and multiple pages with an independent decoder. PyArrow is a test-only dependency; the runtime remains dependency-free.
+`make test` runs parser/calendar boundaries, 1,000 interval-union versus naive attribution cases, exact arbitrary-ID lookup checks, 100,000 timestamp mutations, radix multiset checks and compact/full-width aggregation equivalence. `make parquet-test PYTHON=/path/to/pyarrow-venv/bin/python` builds the native Parquet probe and checks schema, values, empty/all-null columns, definition-level padding and multiple pages with an independent decoder. PyArrow is a test-only dependency; the runtime remains dependency-free.
 
 Official fixtures and public seed-1 answers must be supplied outside the repository. The bundled checker needs an isolated environment with `polars`:
 
