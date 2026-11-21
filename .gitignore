@@ -1,0 +1,11 @@
+/build/
+/data/
+/output/
+/scratch/
+/dev/
+/dev-answer/
+*.parquet
+*.zip
+__pycache__/
+*.profraw
+*.profdata

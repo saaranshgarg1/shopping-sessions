@@ -1,0 +1,13 @@
+.git
+.claude
+tests
+README.md
+BENCHMARKS.md
+build
+data
+output
+scratch
+dev
+dev-answer
+*.zip
+*.parquet
