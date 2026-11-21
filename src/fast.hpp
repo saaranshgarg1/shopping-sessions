@@ -7,13 +7,24 @@ struct Unsupported {};
 // shortcut: nonzero ASCII suffixes up to eight bytes; other IDs use tagged exact string keys.
 inline uint64_t key(SV s, char prefix) {
     if (s.empty() || s.front()!=prefix || s.size()>9) throw Unsupported{};
+    size_t n=s.size()-1;
+    if (!n) return 0;
+    const char* p=s.data()+1;
     uint64_t value=0;
-    for (size_t i=1;i<s.size();++i) {
-        unsigned char c=s[i];
-        if (!c || c>=128) throw Unsupported{};
-        value |= uint64_t(c) << (64-8*i);
-    }
-    return value;
+    // Constant-size bounded loads avoid libc memcpy calls and never cross the field boundary.
+    if (n==8) std::memcpy(&value,p,8);
+    else if (n>=4) {
+        uint32_t head,tail;
+        std::memcpy(&head,p,4); std::memcpy(&tail,p+n-4,4);
+        value=uint64_t(head)|(uint64_t(tail)<<((n-4)*8));
+    } else if (n>=2) {
+        uint16_t head; std::memcpy(&head,p,2);
+        value=uint64_t(head)|(uint64_t(static_cast<unsigned char>(p[n-1]))<<((n-1)*8));
+    } else value=static_cast<unsigned char>(*p);
+    constexpr uint64_t high=0x8080808080808080ULL,low=0x0101010101010101ULL;
+    uint64_t active=high>>(64-n*8);
+    if ((value&high) || ((value-low)&~value&active)) throw Unsupported{};
+    return __builtin_bswap64(value);
 }
 struct Keys {
     char prefix;

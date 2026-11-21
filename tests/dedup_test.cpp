@@ -2,9 +2,33 @@
 #include "../src/main.cpp"
 #undef main
 #include <cassert>
+#include <random>
 
 int main() {
     using namespace sprint;
+    // End every field at a guard page: bounded ID loads must not touch the next byte.
+    size_t page=sysconf(_SC_PAGESIZE);
+    char* guarded=static_cast<char*>(mmap(nullptr,page*2,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0));
+    assert(guarded!=MAP_FAILED && mprotect(guarded,page,PROT_READ|PROT_WRITE)==0);
+    std::mt19937_64 random(211120267);
+    for (char prefix:{'u','e','k'}) for (size_t n=0;n<=8;++n) for (unsigned round=0;round<2000;++round) {
+        char* p=guarded+page-n-1; p[0]=prefix;
+        bool valid=true; uint64_t expected=0;
+        for (size_t i=1;i<=n;++i) {
+            unsigned char c=round%2 ? 1+random()%127 : random()%256;
+            p[i]=char(c); valid&=c && c<128;
+            expected|=uint64_t(c)<<(64-8*i);
+        }
+        bool accepted=true; uint64_t actual=0;
+        try { actual=key(SV(p,n+1),prefix); } catch (const Unsupported&) { accepted=false; }
+        assert(accepted==valid && (!valid || actual==expected));
+    }
+    munmap(guarded,page*2);
+    Keys exact_keys('k');
+    std::vector<std::string> byte_ids{"k", "kA", "kAA", "kZ", "ka", "k12345678",
+                                      "other", "k123456789", "k\xc3\xa9", std::string("kA\0B",4)};
+    for (const auto& a:byte_ids) for (const auto& b:byte_ids)
+        assert(exact_keys.less(exact_keys.get(a),exact_keys.get(b))==(a<b));
     DuplicateFilter filter(64);
     const uint64_t repeated_id=key("eRepeat",'e');
     parallel(128,8,[&](size_t,size_t) { filter.add(repeated_id); });

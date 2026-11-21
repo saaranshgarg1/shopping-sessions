@@ -16,4 +16,10 @@ Potential duplicates retain pointers into the live immutable mappings. A 20-byte
 
 Self-checks cover leap-day/year boundaries, reverse arrival, exact 24h and 24h+1s, offset and epoch event timestamps, lexical versus chronological ordering, and an invalid earliest event winner.
 
+## IDs: bounded word packing
+
+User/event/click IDs with the expected prefix and 1–8 nonzero ASCII suffix bytes use bounded constant-size loads (8, or overlapping 4/2/1 byte pieces), zero/high-bit rejection, then byte swap. Zero padding preserves the previous big-endian suffix representation exactly, including prefix-only IDs. No load reads beyond the field or mapping. Packed comparison remains unsigned byte-ID ordering; embedded NUL, high-bit bytes, wrong prefixes and longer strings keep tagged exact-string fallback. Tests compare 54,000 guarded random IDs against the former shift-loop reference and cross-check packed/generic byte ordering.
+
+The existing conditional F1 SIMD digit/date-cache parser already serves the main path; no competing parser is added.
+
 Publication intentionally precedes builds/tests, as requested. Verification must use an immutable export of the public branch SHA, not the mutable workspace.
