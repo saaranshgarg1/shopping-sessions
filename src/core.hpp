@@ -47,6 +47,9 @@ public:
             for (const auto& e:old) if (e.fingerprint) insert(e.key,e.value);
         }
     }
+    template<class F> void each(F visit) const {
+        for (const auto& e:table) if (e.fingerprint) visit(e.key,e.value);
+    }
     uint32_t get(SV key,uint32_t fallback = UINT32_MAX) const {
         if (table.empty()) return fallback;
         uint64_t h = hash(key); uint32_t fp = uint32_t(h >> 32) | 1;
