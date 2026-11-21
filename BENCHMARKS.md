@@ -2,6 +2,25 @@
 
 Measured 2026-11-21. These are development results, not a leaderboard score. Historical baseline checks below refer to release `9633a571f8633b19c186a160fcce472f0a3a2564`; optimized-source checks and comparisons are recorded separately.
 
+## Packed SIMD push-first candidate
+
+Candidate `ea67dbc7c73f3b52d0edbb97422a21b00f6496f4` was pushed to `perf/packed-simd-sessions` before any build, test, or benchmark of this combination. Base history was public `5c95735d02da562296a5b243cb74c3985a250a9f`; matched benchmark baseline was `9633a571f8633b19c186a160fcce472f0a3a2564`.
+
+Post-push checks passed: native 36 fixtures; exact public seed-1 1M dev answers (117,038 user rows / 27,400 campaign rows); 160 independent typed-model cases, seed 21212126; 125 arbitrary-ID ASCII-orbit cases; four generated seeds in default/dedup-off/generic modes; NUL/UTF-8/long IDs, malformed long rows, cross-4MiB-chunk ties, invalid earliest duplicates, and output-overwrite protection. Forced SSE2 and generic engines also passed all 36 fixtures. Core/perf/dedup/decode assertion tests and ASan/UBSan decoder/dedup checks passed. The separate baseline comparison failed one equal-ingest ordering case in the old baseline; the candidate and its generic engine matched the independent oracle. The optional PyArrow probe could not run: `ModuleNotFoundError: No module named 'pyarrow'`. Polars decoded and exactly checked actual outputs.
+
+Slurm job **39858**, exclusive cn15, eight allocated pinned physical cores, GCC 14.2 with identical flags, no `-march=native`, 24GiB RLIMIT_AS. Both source snapshots rebuilt in the same job. Public seed-1 20M/5M and 60M/15M input copies matched per-file SHA256 metadata. Every timed run began with measured input residency 1.0. All **23 runs** exited 0 and matched both typed baseline tables exactly. Compilation, input staging, prefetch, and output checking were outside timing; start-to-exit native execution and output writing were inside.
+
+| Dataset / input filesystem | Baseline runs (s) | Candidate runs (s) | Median speedup |
+| --- | --- | --- | --- |
+| 20M / tmpfs | 4.94, 4.94, 5.04 | 1.53, 1.56, 1.61 | **3.167x** |
+| 20M / Lustre, tmpfs output | 6.49, 6.64 | 1.83, 2.06 | **3.375x** |
+| 60M / tmpfs | 13.62, 16.46, 14.63 | 5.14, 5.14, 5.32 | **2.846x** |
+| 60M / Lustre, tmpfs output | 20.64, 16.81 | 6.23, 5.92 | **3.082x** |
+
+Additional 20M tmpfs checks: dedup-off 2.10s, forced SSE2 1.65s, forced AVX2 1.57s, all exact. Candidate peak RSS across large runs was at most 9,284,176 KiB. **No 5x, 6.81x, 7x, 8x, or 10x crossing; no MILESTONE success marker.** No browser, official submission, container timing, cold-cache testing, or scorer-equivalence claim. Large baseline agreement is not hidden-answer equality; physical-core/tmpfs/RLIMIT_AS tests are not scorer hyperthread/cgroup/no-swap parity.
+
+Local evidence: `/tmp/shopping-buildathon-verify/PUSH_FIRST`, `/tmp/shopping-buildathon-verify/PACKED_RESULT`, and `/tmp/shopping-push-first/evidence/hpc/run-39858/results.json`. Source archives, compiler/allocation hashes, timings, exact checks, and raw logs remain outside git. A canceled pending job 39857 had a private staging-path typo; it never executed. Corrected job 39858 completed 0:0.
+
 ## Baseline correctness gates
 
 - Official unmodified checker: **36/36 fixtures passed**.
