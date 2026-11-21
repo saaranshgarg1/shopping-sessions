@@ -7,6 +7,14 @@ struct Unsupported {};
 // shortcut: nonzero ASCII suffixes up to eight bytes; other IDs use tagged exact string keys.
 inline uint64_t key(SV s, char prefix) {
     if (s.empty() || s.front()!=prefix || s.size()>9) throw Unsupported{};
+    if (s.size()==9) {
+        uint64_t suffix;
+        std::memcpy(&suffix,s.data()+1,sizeof(suffix));
+        constexpr uint64_t high_bits=0x8080808080808080ULL;
+        constexpr uint64_t ones=0x0101010101010101ULL;
+        if ((suffix&high_bits) || ((suffix-ones)&~suffix&high_bits)) throw Unsupported{};
+        return __builtin_bswap64(suffix); // amd64: preserve byte-wise ID order.
+    }
     uint64_t value=0;
     for (size_t i=1;i<s.size();++i) {
         unsigned char c=s[i];
@@ -215,19 +223,27 @@ template<bool EVENTS> void parse(const std::vector<Mapping>& maps,size_t threads
             size_t part=mix(id)&(PARTS-1);
             if constexpr(EVENTS) {
                 int64_t ingest=0,ts=0;
-                if (!cache.parse(f[3],ingest)) throw std::runtime_error("invalid ingest_ts");
+                const bool needs_dedup=!filter || filter->candidate(id);
                 uint64_t price=0,user=0; uint32_t category=0;
                 bool valid=!f[1].empty() && !f[5].empty() && cache.parse(f[2],ts) && ts>=start && ts<end;
                 if (valid) {
                     if (f[4]=="purchase") valid=digits(f[6],10000000,price) && price;
                     else valid=f[4]=="view" || f[4]=="cart";
                 }
-                if (valid) valid=!(ingest>ts && uint64_t(ingest)-uint64_t(ts)>uint64_t(DAY));
+                // ingest_ts is guaranteed valid UTC. Two UTC instants on the
+                // same calendar day cannot exceed the 24-hour lateness limit.
+                // Potential duplicates still need ingest order, even for an invalid event.
+                const bool needs_lateness=valid && !(f[2].size()==20 && f[2][19]=='Z' &&
+                    f[3].size()==20 && std::memcmp(f[2].data(),f[3].data(),10)==0);
+                if (needs_dedup || needs_lateness) {
+                    if (!cache.parse(f[3],ingest)) throw std::runtime_error("invalid ingest_ts");
+                    if (needs_lateness && ingest>ts && uint64_t(ingest)-uint64_t(ts)>uint64_t(DAY)) valid=false;
+                }
                 if (valid) {
                     user=people.person(users.get(f[1]));
                     if (price) category=products.get(f[5],0);
                 }
-                if (filter && !filter->candidate(id)) {
+                if (!needs_dedup) {
                     if (valid) unique[mix(user)&(PARTS-1)].push_back({user,ts,category,uint32_t(price)});
                 } else ev[part].push_back({id,user,ts,ingest,category,valid ? uint32_t(price) : INVALID});
             } else {

@@ -127,7 +127,7 @@ struct DateCache {
     struct Date { uint64_t head=0; uint16_t tail=0; int64_t midnight=0; };
     std::array<Date,256> dates{};
     bool parse(SV s,int64_t& out) {
-        if (s.size()!=20 || s[19]!='Z' || s[4]!='-') return ss::timestamp(s,out);
+        if (s.size()!=20 || s[19]!='Z' || s[4]!='-') return ss::timestamp_fast(s,out);
         if (s[7]!='-' || s[10]!='T' || s[13]!=':' || s[16]!=':') return false;
         auto bytes=_mm_loadu_si128(reinterpret_cast<const __m128i*>(s.data()));
         auto valid=_mm_and_si128(_mm_cmpgt_epi8(bytes,_mm_set1_epi8('/')),
