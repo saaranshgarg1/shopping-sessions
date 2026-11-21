@@ -175,13 +175,12 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
         data.insert(data.end(), blob.begin(), blob.end());
         defs.clear();
       }
-      data.insert(data.end(), vals.begin(), vals.end());
-      vals.clear();
-
+      // Write level bytes and PLAIN values separately, avoiding a full page copy.
+      const size_t data_size = data.size() + vals.size();
       TCompact ph;
       ph.i32(1, PTYPE_DATA);
-      ph.i32(2, int32_t(data.size()));  // uncompressed_page_size
-      ph.i32(3, int32_t(data.size()));  // compressed_page_size (no compression)
+      ph.i32(2, int32_t(data_size));  // uncompressed_page_size
+      ph.i32(3, int32_t(data_size));  // compressed_page_size (no compression)
       ph.sb(5);                         // DataPageHeader (v1)
       ph.i32(1, int32_t(page_rows));    // num_values, slots including nulls
       ph.i32(2, ENC_PLAIN);
@@ -191,10 +190,11 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
       ph.b.push_back(T_STOP);           // close PageHeader (top level)
       f.write(reinterpret_cast<const char*>(ph.b.data()),
               std::streamsize(ph.b.size()));
-      f.write(reinterpret_cast<const char*>(data.data()),
-              std::streamsize(data.size()));
+      if (!data.empty()) f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+      if (!vals.empty()) f.write(reinterpret_cast<const char*>(vals.data()), std::streamsize(vals.size()));
+      vals.clear();
       ch.num_values += int64_t(page_rows);
-      const int64_t sz = int64_t(ph.b.size() + data.size());
+      const int64_t sz = int64_t(ph.b.size() + data_size);
       ch.size += sz;
       rg_size += sz;
       page_rows = 0;

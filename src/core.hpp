@@ -58,6 +58,7 @@ public:
             at = (at+1) & (table.size()-1);
         }
     }
+    template<class F> void each(F fn) const { for (const auto& e:table) if (e.fingerprint) fn(e.key,e.value); }
     // Returns the stored value and whether this exact key was newly inserted.
     std::pair<uint32_t,bool> insert(SV key,uint32_t value) {
         if (table.empty() || (used+1)*3 > table.size()*2) grow();
