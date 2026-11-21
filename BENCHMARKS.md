@@ -116,4 +116,21 @@ Tmpfs baseline peak RSS was 3.197/9.053 GiB at 20M/60M. Public optimized 5c95735
 
 Final evidence: `/tmp/shopping-buildathon-verify/HPC/release-v3/final-39855/` and remote `/scratch/user_data/saide/2024aib1015/shopping-sessions/runs/release-v3-final-39855`. Raw results retain user/system CPU time, percentage CPU, GNU elapsed, parent subprocess elapsed (separate), input residency, phase stderr, output bytes/blocks, faults/swaps, exact table comparisons and post-run fsync. Output equality checks compare every sorted row and typed value, not only hashes or aggregate totals.
 
+### Selected final worker export, job 39859
+
+The selected final export arrived before publication. Its only subsequent engine changes were an EOF pointer boundary fix and signed-64-bit person radix sorting at 1,024 events, with boundary/radix regressions. These were integrated without removing prior optimized fallback features. Independent integrated gates passed 36 fixtures, exact dev, core/perf/fast/PyArrow tests, 100 randomized cases seed 211120268 at NCPU=8, 100 cases seed 211120269 at NCPU=128, 124 exact-ID/forced-fallback datasets for both default and fallback, and ASan+UBSan fast tests.
+
+Job 39859 completed 0:0 in 4m36s, cn15 cores 0–7, identical compile/input/cache/output conditions and serial schedule to job 39855. All **22 large outputs** matched complete sorted typed baseline tables; remote 36 fixtures/dev passed. Source hashes matched the integrated release exactly.
+
+| Input/device | Baseline wall, s | Terminal v3 wall, s | Baseline→v3 medians, s | Speedup | V3 peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| 20M, tmpfs | 5.01, 5.10, 4.96 | 2.50, 1.91, 2.49 | 5.01→2.49 | 2.012x | 2.936 GiB |
+| 60M, tmpfs | 13.53, 16.59, 15.23 | 7.62, 6.60, 6.38 | 15.23→6.60 | 2.308x | 8.706 GiB |
+| 20M, warm Lustre input/local output | 6.30, 6.39 | 2.03, 4.30 | 6.345→3.165 | 2.005x | 2.935 GiB |
+| 60M, warm Lustre input/local output | 20.55, 20.66 | 11.07, 8.92 | 20.605→9.995 | 2.062x | 8.706 GiB |
+
+The wide 20M Lustre v3 spread makes its two-run median uncertain; do not substitute its best run for a score. Tmpfs three-run medians support faster scale performance under these conditions, not a general filesystem or scorer claim. Single-run public 5c95735 diagnostics were 3.66/10.81 s. There is no >=5x result, no sub-0.8-second 20M result, and no robust extra radix end-to-end gain claim from comparing separate jobs.
+
+Evidence: `/tmp/shopping-buildathon-verify/HPC/release-v3/terminal-39859/`, `terminal-validation.log`, `terminal-extra-validation.log`; remote `/scratch/user_data/saide/2024aib1015/shopping-sessions/runs/release-v3-terminal-39859`. Historical measurements above remain unchanged. The independent dedup-prefilter worker's patch and 20M-only results remain a separate follow-up, not silently merged or relabeled; its 60M validation was not available for this release. The SIMD experiment was not promoted because its measured end-to-end improvement was unreliable.
+
 Native CPU results are **not scorer predictions**: physical Xeon cores are not eight N2 hyperthreads; RLIMIT_AS=24 GiB is not verified cgroup RSS/page-cache/no-swap enforcement (Slurm metadata reports AllocMem=0); process affinity restricts all threads to the same core set but does not individually bind each worker. Node was not reserved exclusively. Warm tmpfs is not cold storage or persistent output; Lustre server cache is unknown. GNU time has 10 ms precision and includes timeout/prlimit/startup; executable phase clocks exclude startup and checking. No >=5x/7x/8x/10x speedup or sub-0.8-second 20M result was observed.

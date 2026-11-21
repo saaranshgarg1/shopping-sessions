@@ -56,6 +56,27 @@ int main() {
         assert(p==line.data()+line.size());
         if (ok) assert(fast==slow);
     }
+    for (size_t size=0;size<64;++size) {
+        std::string first(size,'x'); first+=",\"\",z,4";
+        std::string input=first+"\ny,2,3,4\n";
+        const char* p=input.data(); std::array<SV,4> fields{};
+        assert(sprint::csv_next(p,input.data()+input.size(),fields));
+        assert(fields[0]==SV(first.data(),size) && fields[1].empty());
+        assert(sprint::csv_next(p,input.data()+input.size(),fields));
+        assert(fields[0]=="y" && p==input.data()+input.size());
+    }
+    std::vector<sprint::PersonEvent> sort_scratch;
+    for (size_t count:{0,1,2,1023,1024,4097,50000}) {
+        std::vector<sprint::PersonEvent> rows;
+        for (size_t i=0;i<count;++i) rows.push_back({int64_t(rng()),uint32_t(i),uint32_t(i)});
+        auto expected=rows;
+        std::sort(expected.begin(),expected.end(),[](const auto& a,const auto& b) { return a.ts<b.ts; });
+        sprint::sort_events(rows.data(),rows.size(),sort_scratch);
+        for (size_t i=0;i<count;++i) assert(rows[i].ts==expected[i].ts && rows[i].category==expected[i].category);
+        for (auto& row:rows) row.ts=1;
+        sprint::sort_events(rows.data(),rows.size(),sort_scratch);
+        for (const auto& row:rows) assert(row.ts==1);
+    }
     // Exact collisions, invalid earliest winner, and unsupported ties must survive copy-free dedup.
     std::array<Partition<sprint::RawEvent>,PARTS> raw_events;
     std::array<Partition<sprint::RawClick>,PARTS> raw_clicks;

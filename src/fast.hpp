@@ -131,7 +131,7 @@ template<size_t N> bool csv_next(const char*& p,const char* end,std::array<SV,N>
         }
         if (count<N) fields[count]=s;
         else valid=false;
-        ++count; start=stop+1; quotes=0; first_quote=last_quote=nullptr;
+        ++count; start=stop==end ? end : stop+1; quotes=0; first_quote=last_quote=nullptr;
     };
     const char* q=p;
     while (q<end) {
@@ -234,6 +234,27 @@ struct PersonEvent { int64_t ts; uint32_t category,price; };
 struct PersonClick { uint64_t id; int64_t ts; uint32_t campaign; };
 static_assert(sizeof(Event)==24 && sizeof(PersonEvent)==16);
 constexpr uint32_t INVALID=UINT32_MAX;
+
+inline void sort_events(PersonEvent* rows,size_t count,std::vector<PersonEvent>& scratch) {
+    if (count<2) return;
+    if (count<1024) {
+        std::sort(rows,rows+count,[](const auto& a,const auto& b) { return a.ts<b.ts; }); return;
+    }
+    uint64_t first=uint64_t(rows[0].ts)^(uint64_t(1)<<63),vary=0;
+    for (size_t i=1;i<count;++i) vary|=(uint64_t(rows[i].ts)^(uint64_t(1)<<63))^first;
+    if (!vary) return;
+    scratch.resize(count); auto* src=rows; auto* dst=scratch.data();
+    for (unsigned shift=0;shift<64;shift+=8) {
+        if (!(vary&(uint64_t(255)<<shift))) continue;
+        std::array<size_t,256> offsets{};
+        for (size_t i=0;i<count;++i) ++offsets[((uint64_t(src[i].ts)^(uint64_t(1)<<63))>>shift)&255];
+        size_t start=0;
+        for (auto& value:offsets) { size_t n=value; value=start; start+=n; }
+        for (size_t i=0;i<count;++i) dst[offsets[((uint64_t(src[i].ts)^(uint64_t(1)<<63))>>shift)&255]++]=src[i];
+        std::swap(src,dst);
+    }
+    if (src!=rows) std::copy(src,src+count,rows);
+}
 
 template<bool EVENTS> void parse(const std::vector<Mapping>& maps,size_t threads,const People& people,
                                 Keys& ids,Keys& users,const Lookup& products,const Lookup& campaigns,int64_t start,int64_t end,
@@ -362,9 +383,10 @@ Result aggregate(Partition<Event>& ep,Partition<Click>& cp,const Catalog& catalo
     std::vector<uint32_t> touched;
     std::vector<size_t> covered(catalog.campaigns.size());
     std::vector<Session> sessions;
+    std::vector<PersonEvent> sort_scratch;
     for (size_t user=0;user<keys.size();++user) {
         size_t begin=offsets[user],finish=offsets[user+1],cb=click_offsets[user],ce=click_offsets[user+1];
-        std::sort(grouped.begin()+begin,grouped.begin()+finish,[](const auto& a,const auto& b) { return a.ts<b.ts; });
+        sort_events(grouped.data()+begin,finish-begin,sort_scratch);
         std::sort(grouped_clicks.begin()+cb,grouped_clicks.begin()+ce,[&](const auto& a,const auto& b) {
             return a.ts==b.ts ? click_ids.less(b.id,a.id) : a.ts<b.ts;
         });
