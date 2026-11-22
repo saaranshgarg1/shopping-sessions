@@ -390,13 +390,16 @@ void write_campaigns(const fs::path& path,const std::vector<Stats>& stats,const 
     pq::write(path.string(),cols);
 }
 #include "fast.hpp"
+#include "v5.hpp"
 int main(int argc,char** argv) {
     try {
         if (argc!=1 && argc!=3) throw std::runtime_error("usage: shopping-sessions [DATA_DIR OUTPUT_DIR]");
         fs::path data=argc==3 ? argv[1] : setting("DATA_DIR","/data");
         fs::path output=argc==3 ? argv[2] : setting("OUTPUT_DIR","/output");
         uint64_t ncpu=0; if (!digits(setting("NCPU","8"),128,ncpu) || !ncpu) throw std::runtime_error("NCPU must be 1..128");
-        size_t threads=ncpu;
+        cpu_set_t allowed; CPU_ZERO(&allowed);
+        size_t available=sched_getaffinity(0,sizeof(allowed),&allowed)==0 ? size_t(CPU_COUNT(&allowed)) : ncpu;
+        size_t threads=std::min<size_t>(ncpu,available);
         auto clock=std::chrono::steady_clock::now(),last=clock;
         auto timing=[&](const char* stage) { auto now=std::chrono::steady_clock::now();
             std::cerr<<stage<<" "<<std::chrono::duration<double>(now-last).count()<<"s\n"; last=now; };
@@ -410,7 +413,11 @@ int main(int argc,char** argv) {
                 throw std::runtime_error("refusing to overwrite nonempty output " + path.string());
             fs::create_directories(path);
         }
-        if (setting("SS_BASELINE","0")!="1" && sprint::run(data,output,threads,start,end,first_day,days)) return 0;
+        if (setting("SS_BASELINE","0")!="1") {
+            if (setting("SS_LEGACY","0")=="1") {
+                if (sprint::run(data,output,threads,start,end,first_day,days)) return 0;
+            } else if (v5::run(data,output,threads,start,end,first_day,days)) return 0;
+        }
         auto link_maps=map_files(files(data/"links"));
         Identity identity;
         for (auto chunk:chunks(link_maps)) lines(chunk,[&](SV row) {

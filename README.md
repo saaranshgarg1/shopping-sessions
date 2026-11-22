@@ -1,51 +1,51 @@
-# Shopping Sessions — native exact pipeline
+# Shopping Sessions v5 — exact native pipeline
 
-Standalone C++20 implementation of the [Shopping Sessions track](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime dependencies beyond Linux and libc. No data, binaries, or downloaded archives belong in this repository.
+Submission-ready C++20 executable for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
 
-## Build and run
+## Submit
 
-```sh
-make
-make test
-NCPU=8 /tmp/shopping-native-build/shopping-sessions /path/to/data /path/to/empty-output
-```
-
-With no arguments, reads `DATA_DIR` (default `/data`) and writes `OUTPUT_DIR` (default `/output`). `NCPU` defaults to 8; lower it on small hosts. Build artifacts default to `/tmp/shopping-native-build`; override `BUILD_DIR` when needed. `SCRATCH_DIR` and `MEM_GB` are supplied by the evaluator but are not required: this implementation does not spill to disk. Output table folders must be absent or empty; existing output is never silently overwritten.
+Use repository `saaranshgarg1/shopping-sessions`, branch `main`, with the commit reported after push. Dockerfile is at repository root. The evaluator launches the native executable directly.
 
 ```sh
 docker build --platform linux/amd64 -t shopping-sessions .
-docker run --rm --platform linux/amd64 --network none --read-only \
-  --user 1000:1000 --cpus 8 --memory 24g --memory-swap 24g \
-  --tmpfs /tmp:rw,size=64m \
-  -v /absolute/data:/data:ro -v /absolute/output:/output \
-  -v /absolute/scratch:/scratch shopping-sessions
+docker run --rm --network none --read-only --user 1000:1000 \
+  --cpus 8 --cpuset-cpus 0-7 --memory 24g --memory-swap 24g \
+  -v /absolute/input:/data:ro -v /absolute/output:/output:rw \
+  -v /absolute/scratch:/scratch:rw shopping-sessions
 ```
 
-Mounted output and scratch folders must be writable by uid 1000. Docker downloads build images only; the executable requires no network. Compiler and runtime use the same Debian release; C++ runtime libraries are statically linked.
+Output/scratch must be writable by uid 1000. Output table directories must be absent or empty. No arguments uses `DATA_DIR=/data`, `OUTPUT_DIR=/output`, `NCPU=8`; optional arguments are `shopping-sessions DATA_DIR OUTPUT_DIR`.
 
-## Exact semantics and architecture
-
-1. Memory-map every input CSV file. Parse only LF as a line ending; strip whole-field quotes, never trim or normalize values. Work is divided at row boundaries into 4 MiB chunks for balanced parallel ingest.
-2. Resolve all valid links with path-compressed union-find, keeping the byte-wise smallest identity, including IDs with no activity. Read-only string views refer to mapped input for the entire run.
-3. Scan separators, quotes and line boundaries together with portable SSE2. Pack eligible IDs losslessly into 64-bit keys; all other exact strings use tagged interned keys. Hash-partition all parsed rows by exact event ID, retaining invalid copies. Dedup with four-byte slots and stable block pointers before discarding invalid winners. Conflicting equal-ingest events or duplicate clicks restart the preserved generic engine before output writing; sorted file/chunk order determines its winner.
-4. Validate ASCII digits, Gregorian calendar, timezone offset, windows, purchase amount, type, product ID and late-arrival boundary. Cached dates are accepted only after full calendar validation; arbitrary timestamp forms use the generic parser. Sparse or noncanonical catalog IDs use exact flat lookup instead of dense indexes. Hash-partition surviving rows by canonical person, not original user ID.
-5. Count and scatter events/clicks directly into contiguous person blocks, then sort each person's full-width timestamps. People with at least 1,024 events use signed 64-bit radix sorting, skipping invariant bytes; smaller groups use comparison sorting. Equal timestamps share a session; split only at a gap greater than 30 minutes. Assign all session activity to the UTC start day. The preserved generic fallback retains its compact/radix path and full-width wide-window support.
-6. Scan time-sorted clicks for exact last-click credit, with smallest byte-wise click ID winning ties. Assist counting uses per-campaign interval unions over sorted session indices. It never materializes a session-by-click or session-by-campaign join, including shared-device and whale people.
-7. Reduce integer aggregates and write standard uncompressed PLAIN Parquet with native DATE, UTF-8 strings, nullable top category, and 64-bit metrics. Each user hash partition produces an independent file. Row order is irrelevant.
-
-Default event processing uses 40-byte raw records, 24-byte surviving records and 16-byte person-block records on amd64. Dedup tables store 32-bit indices into stable winner-pointer arrays, not copied raw rows. Parquet pages write definition levels and values separately, avoiding a full-page copy. All decisions use exact input values; ID naming only selects a lossless representation, never semantics. No probabilistic dedup, fixed window, seed-specific code or approximate arithmetic. Set `SS_BASELINE=1` to select the preserved generic optimized engine.
-
-## Verification
-
-`make test` runs parser/calendar boundaries, 1,000 interval-union versus naive attribution cases, exact arbitrary-ID lookup checks, packed/generic key round trips and lexical ordering, 100,000 timestamp mutations per parser path, 30,000 SIMD-versus-generic CSV rows, copy-free dedup and deterministic fallback checks, radix multiset checks and compact/full-width aggregation equivalence. `make parquet-test PYTHON=/path/to/pyarrow-venv/bin/python` builds the native Parquet probe and checks schema, values, empty/all-null columns, definition-level padding and multiple pages with an independent decoder. PyArrow is a test-only dependency; the runtime remains dependency-free.
-
-Official fixtures and public seed-1 answers must be supplied outside the repository. The bundled checker needs an isolated environment with `polars`:
+## Build and test locally
 
 ```sh
-/path/to/venv/bin/python -I tests/verify.py fixtures /external/fixtures /tmp/shopping-native-build/shopping-sessions
-/path/to/venv/bin/python -I tests/verify.py compare /external/output /external/dev-answer
+make all test
+NCPU=8 build/shopping-sessions INPUT EMPTY_OUTPUT
+make parquet-test PYTHON=/path/to/isolated/pyarrow/python
+/path/to/isolated/python -I tests/verify.py fixtures EXTERNAL_FIXTURES build/shopping-sessions
+/path/to/isolated/python -I tests/verify.py compare OUTPUT MATCHING_DEV_ANSWER
+/path/to/isolated/python -I tests/differential.py build/shopping-sessions ORACLE_BINARY --cases 20
 ```
 
-In this development environment, the fixture/data worker exposes `/tmp/shopping-buildathon-verify/READY` and its checker commands. The independent oracle and fuzz runner live under `/tmp/shopping-buildathon-audit/`.
+Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped by allowed CPU affinity. `SS_BASELINE=1` selects the preserved full-width reference; `SS_LEGACY=1` selects the former sprint engine. Windows wider than signed 32-bit milliseconds, or CPUs without AVX2, fall back to the reference.
 
-See `BENCHMARKS.md` for measured checks, resource use, and limitations. Local timings do not predict leaderboard rank.
+## Engine
+
+- Persistent worker pool; LF-aligned mapped CSV chunks. Runtime AVX2/AVX-512F/BW dispatch, bounded loads at mapping ends, exact whole-field quote validation. CR and spaces remain data.
+- Checked F1/F2/F3 timestamps and purchase amounts. Valid ingest F1 copies compare chronologically by bytes. Calendar caching and date-based lateness shortcut preserve 24-hour boundaries.
+- Producer-local 28-byte event rows plus 16-byte hash/chunk/row descriptors. One worker owns each exact event-ID shard. Full length/bytes resolve hash collisions; an invalid earliest copy suppresses later valid copies across users.
+- Exact shard-owned alias dictionaries, union-find, and bytewise minimum person names including link-only IDs. Compact surviving rows route to canonical person owners; purchases use sparse payloads.
+- Half-hour event bins keep actual min/max/count/revenue. Occupied bins merge only when endpoint gap is at most 30 minutes; no per-event sort. Daily category totals use session-start date.
+- Unsorted click intervals over session indices. Latest timestamp then bytewise smallest click ID wins credit; campaign bitsets count assists once. Identical click copies are idempotent, eliminating global click dedup and sorting.
+- Per-worker campaign counters and independent person-owned Parquet files. DATE, real null definition levels, UTF-8 and int64 revenue. Checked footer close before exit, including empty tables.
+- Release binary uses `-O3`, LTO, static C++ runtime linkage and stripping. AVX-512 is isolated behind CPU feature checks, not a global ISA requirement.
+
+`SS_SIMD=avx2|avx512|auto` permits A/B measurements. No generator ID inversion, fixed manifest dates, approximation, or probabilistic dedup.
+
+## Validation and performance
+
+See [BENCHMARKS.md](BENCHMARKS.md). All 36 official fixtures and both matching fresh v5 public dev tables passed. Complete 20M-event/5M-click proxy tables matched the reference, including DATE, unique keys and reconciled totals. Parser/reducer randomized checks and AddressSanitizer/UndefinedBehaviorSanitizer passed.
+
+Target remains a correct official hidden-practice median **below 0.300s**. Laptop dev runs below 300ms do not satisfy that target. Submit, read the official result, then iterate on measured bottlenecks. Local median for 20M practice proxy was 3.79s, not below target.
+
+`tests/prepare.py` downloads matching v5 artifacts into isolated directories and builds the generator with Rust 1.85+. `tests/bench.py` alternates fresh candidate/reference processes, hashes inputs/binaries/artifacts, records wall time/faults, and exact-compares typed tables. Native affinity is not CPU quota or no-swap enforcement; advisory eviction is not proof of cold cache. `tests/calibrate.cpp` exposes empty launch, structural scan, and output replay probes.
