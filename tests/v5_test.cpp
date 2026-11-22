@@ -115,13 +115,45 @@ int main() {
     auto filtered=v5::select(false_hits,0);
     assert(filtered.descriptors==3 && filtered.duplicates==0);
     for (const auto& s:false_hits) assert(s.events[0].time==0);
-    std::string links="u3,uZ\nuZ,A-link-only\nuZ,u3\nA-link-only,A-link-only\nempty,\n";
+    std::string links="u3,uZ\nuZ,A-link-only\nuZ,u3\nA-link-only,A-link-only\nempty,\nuClick,uClickAlias\nuClickAlias,B-click-only\n";
     v5::Source link_source{}; link_source.kind=v5::LINKS; link_source.chunk={links.data(),links.data()+links.size()};
     v5::scan(link_source,4,products,campaigns,1790812800000,1790812800000+DAY,32);
-    assert(link_source.links.size()==4); sources.push_back(std::move(link_source));
+    assert(link_source.links.size()==6); sources.push_back(std::move(link_source));
+    std::string click_text="k,uClick,c_0,1790812800000\n";
+    v5::Source click_source{}; click_source.kind=v5::CLICKS;
+    click_source.chunk={click_text.data(),click_text.data()+click_text.size()};
+    click_source.clicks.push_back({0,1,2,6,0,1}); sources.push_back(std::move(click_source));
     v5::People people; people.build(sources,pool);
-    auto& row=sources[2].events[0];
-    auto person=people.person(row.user_offset,row.user_length);
-    assert(people.names[person]=="A-link-only");
-    std::cout<<"v5 tests passed: 60000 differential CSV rows, guard pages, pool, full-hash collisions, invalid earliest, linked IDs\n";
+    const auto& row=sources[2].events[0];
+    assert(v5::view(sources[2],row.user_offset,row.user_length)=="u3");
+    const auto& click_row=sources[5].clicks[0];
+    assert(v5::view(sources[5],click_row.user_offset,click_row.user_length)=="uClick");
+    size_t events=0,clicks=0;
+    uint32_t event_person=UINT32_MAX,click_person=UINT32_MAX;
+    for (const auto& shard:people.shards) {
+        for (const auto& event:shard.events) {
+            ++events;
+            assert(event.time==0 && event.purchase==0);
+            event_person=people.parent[shard.base+event.user];
+            assert(people.names[event_person]=="A-link-only");
+        }
+        for (const auto& click:shard.clicks) {
+            ++clicks;
+            assert(click.ref.source==5 && click.ref.row==0);
+            click_person=people.parent[shard.base+click.user];
+            assert(people.names[click_person]=="B-click-only");
+        }
+    }
+    assert(events==1 && clicks==1 && event_person!=click_person);
+    size_t owners=0,roots=0;
+    for (size_t part=0;part<PARTS;++part) for (size_t index=0;index<people.owners[part].size();++index) {
+        uint32_t person=people.owners[part][index]; ++owners;
+        assert(people.parent[person]==person && (mix(person)&(PARTS-1))==part);
+        assert(people.dense[person]==index);
+    }
+    for (uint32_t person=0;person<people.parent.size();++person) roots+=people.parent[person]==person;
+    assert(owners==roots);
+    assert(people.owners[mix(event_person)&(PARTS-1)][people.dense[event_person]]==event_person);
+    assert(people.owners[mix(click_person)&(PARTS-1)][people.dense[click_person]]==click_person);
+    std::cout<<"v5 tests passed: 60000 differential CSV rows, guard pages, pool, full-hash collisions, invalid earliest, linked IDs, dense owners\n";
 }

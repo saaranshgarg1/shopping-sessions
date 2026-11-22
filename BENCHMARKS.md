@@ -1,12 +1,24 @@
-# v10 early whale-bin folding candidate
+# v11 dense-owner routing candidate
 
 ## Current iteration
+
+Official user-reported scores: winning v9 **2.2446s**, v10 early-bin folding **2.2962s**. v10 regression rejected; v11 restores the v9 reducer and removes early folding. Target remains **below 0.400s**.
+
+v11 changes identity-to-person routing: each identity shard emits compact surviving event records and click references during the existing interning pass rather than writing user handles back into every source event/click row. After link union-find, canonical roots receive owner partitions and dense partition-local indices once. Emitted records route directly with those indices, removing per-row hash lookups during grouping. Exact full-byte collision handling and silent production execution remain required.
+
+Verification passed: all36 official fixtures, four boundary-heavy differential datasets, adapted dense-owner/click-only ownership tests, full native unit suite, silent offline read-only dev container against fresh official answers, complete20M typed oracle comparison and focused independent gate. One laptop proxy run took2.62s; official v11 score remains pending.
+
+---
+
+# Rejected v10 early whale-bin folding candidate
+
+## Previous iteration
 
 Official user-reported winning v9 score: **2.2446s** (18% faster than v7). Target remains **below0.400s**.
 
 v10 keeps v9 exact compact identity and folds non-purchase events for canonical people with >=8,192 surviving events into per-producer half-hour min/max/count summaries before person routing/grouping. Purchases remain exact sparse rows; reducer merges summary endpoints/counts with purchase bins before session/day/attribution. Counts include all aliases in linked/shared-device components and only valid dedup winners. No approximation or cached output; runtime silent.
 
-Gate: all 36 fixtures, four differential datasets, 1,100 folded-versus-raw randomized histories, complete 20M proxy exact table comparison and silent offline dev container passed. One laptop 20M run took3.27s, not an official performance result. Await v10 scorer score.
+Gate: all 36 fixtures, four differential datasets, 1,100 folded-versus-raw randomized histories, complete 20M proxy exact table comparison and silent offline dev container passed. One laptop 20M run took3.27s, not an official performance result. User-reported official v10 score: **2.2962s**, slower than winning v9 **2.2446s**.
 
 ---
 
@@ -18,7 +30,7 @@ Official user-reported scores: v7 **2.7389s**, v8 **2.8354s**. Rejected repeat f
 
 v9 changes identity ownership only: 16-byte alias descriptors carry lossless short-ID keys or tagged fingerprints into shard-local compact key/handle tables. Repeated short aliases avoid mapped-name rereads and repeated hash computation. Long/arbitrary IDs still use full-byte comparisons on key matches. Component naming, links, sessions, attribution and output remain exact. Runtime remains silent.
 
-Gate: 10,000 arbitrary-byte ID cases, forced fallback collisions, all 36 fixtures, four differential datasets and silent offline dev container passed. One laptop 20M run completed in 3.36s; not an official speed claim. Await v9 scorer result.
+Gate: 10,000 arbitrary-byte ID cases, forced fallback collisions, all 36 fixtures, four differential datasets and silent offline dev container passed. One laptop 20M run completed in 3.36s; not an official speed claim. User-reported official v9 score: **2.2446s**.
 
 ---
 

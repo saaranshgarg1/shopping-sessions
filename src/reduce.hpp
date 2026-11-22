@@ -10,7 +10,6 @@ namespace v5 {
 
 // purchase is 0 for none, otherwise index+1 into the shared Purchase vector.
 struct BinEvent { uint32_t time, purchase; };
-struct BinSummary { uint32_t first,last,count; int64_t revenue; };
 struct Purchase { uint32_t category, price; };
 struct Click { ss::SV id; int64_t time; uint32_t campaign; };
 struct Daily { int32_t day; int64_t sessions, events, revenue; uint32_t category; bool has_category;
@@ -57,7 +56,7 @@ inline void reduce(const BinEvent* events, size_t event_count,
                    const std::vector<ss::SV>& categories,
                    size_t campaigns, int64_t first_day, size_t days,
                    std::vector<Daily>& daily, std::vector<ss::Stats>& stats,
-                   Scratch& sc,const BinSummary* summaries=nullptr,size_t summary_count=0) {
+                   Scratch& sc) {
     if (sc.bcount.size() < bin_count) {
         sc.bmin.resize(bin_count); sc.bmax.resize(bin_count);
         sc.bcount.resize(bin_count); sc.brev.resize(bin_count); sc.bsess.resize(bin_count);
@@ -75,17 +74,6 @@ inline void reduce(const BinEvent* events, size_t event_count,
             ++sc.bcount[b];
         }
         if (events[i].purchase) sc.brev[b] += purchases[events[i].purchase - 1].price;
-    }
-    for (size_t i=0;i<summary_count;++i) {
-        const auto& summary=summaries[i]; uint32_t b=uint32_t(summary.first/ss::GAP);
-        if (b>=bin_count) continue;
-        if (!sc.bcount[b]) {
-            sc.occ.push_back(b); sc.bmin[b]=summary.first; sc.bmax[b]=summary.last;
-            sc.bcount[b]=summary.count; sc.brev[b]=summary.revenue;
-        } else {
-            sc.bmin[b]=std::min(sc.bmin[b],summary.first); sc.bmax[b]=std::max(sc.bmax[b],summary.last);
-            sc.bcount[b]+=summary.count; sc.brev[b]+=summary.revenue;
-        }
     }
     std::sort(sc.occ.begin(), sc.occ.end());
     sc.sstart.clear(); sc.srev.clear(); sc.sevents.clear();

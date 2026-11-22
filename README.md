@@ -1,6 +1,6 @@
-# Shopping Sessions v10 — exact native pipeline
+# Shopping Sessions v11 candidate — exact native pipeline
 
-Submission-ready C++20 executable for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
+C++20 candidate for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). **v11 verification pending.** No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
 
 ## Submit
 
@@ -40,7 +40,8 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 - Checked F1/F2/F3 timestamps and purchase amounts. Valid ingest F1 copies compare chronologically by bytes. Calendar caching and date-based lateness shortcut preserve 24-hour boundaries.
 - Producer-local 28-byte event rows plus 16-byte hash/chunk/row descriptors. One worker owns each exact event-ID shard. Full length/bytes resolve hash collisions; an invalid earliest copy suppresses later valid copies across users.
 - Exact shard-owned alias dictionaries, union-find, and bytewise minimum person names including link-only IDs. Compact surviving rows route to canonical person owners; purchases use sparse payloads.
-- Canonical people with at least 8,192 surviving events fold non-purchases into producer-local half-hour min/max/count summaries before route/group copies. Purchases stay sparse exact rows; summary-only people remain visible.
+- v11 restores the winning v9 reducer and removes v10 early-bin folding after its 2.2962s regression against v9's 2.2446s.
+- Identity shards emit compact surviving events and click references during interning instead of rewriting every source row's user handles. After union-find, each canonical root receives an owner partition and dense partition-local index once; routing carries that index directly into grouping, eliminating per-row grouping hash lookups.
 - Half-hour event bins keep actual min/max/count/revenue. Occupied bins merge only when endpoint gap is at most 30 minutes; no per-event sort. Daily category totals use session-start date.
 - Unsorted click intervals over session indices. Latest timestamp then bytewise smallest click ID wins credit; campaign bitsets count assists once. Identical click copies are idempotent, eliminating global click dedup and sorting.
 - Per-worker campaign counters and independent person-owned Parquet files. DATE, real null definition levels, UTF-8 and int64 revenue. Checked footer close before exit, including empty tables.
@@ -50,7 +51,7 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 
 ## Validation and performance
 
-See [BENCHMARKS.md](BENCHMARKS.md). All 36 official fixtures and both matching fresh v5 public dev tables passed. Complete 20M-event/5M-click proxy tables matched the reference, including DATE, unique keys and reconciled totals. Parser/reducer randomized checks and AddressSanitizer/UndefinedBehaviorSanitizer passed.
+See [BENCHMARKS.md](BENCHMARKS.md). v11 passed all36 official fixtures, four differential datasets, native unit tests, matching fresh v5 dev tables in a silent offline read-only container, and complete20M-event/5M-click reference comparison including DATE, unique keys and reconciled totals. One laptop proxy run took2.62s; official performance remains unverified.
 
 Current target is a correct official hidden-practice median **below 0.400s**, relaxed from 0.300s. Small dev runs do not satisfy that target. Submit, read the official result, then iterate on measured bottlenecks. Local median for 20M practice proxy was 3.79s, not below target.
 
