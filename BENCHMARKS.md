@@ -1,6 +1,18 @@
-# v8 exact-repeat-filter candidate
+# v9 compact identity ownership candidate
 
 ## Current iteration
+
+Official user-reported scores: v7 **2.7389s**, v8 **2.8354s**. Rejected repeat filter and restored v7 event selection. Target remains **below 0.400s**.
+
+v9 changes identity ownership only: 16-byte alias descriptors carry lossless short-ID keys or tagged fingerprints into shard-local compact key/handle tables. Repeated short aliases avoid mapped-name rereads and repeated hash computation. Long/arbitrary IDs still use full-byte comparisons on key matches. Component naming, links, sessions, attribution and output remain exact. Runtime remains silent.
+
+Gate: 10,000 arbitrary-byte ID cases, forced fallback collisions, all 36 fixtures, four differential datasets and silent offline dev container passed. One laptop 20M run completed in 3.36s; not an official speed claim. Await v9 scorer result.
+
+---
+
+# Rejected v8 exact-repeat-filter candidate
+
+## Previous iteration
 
 Target relaxed to **below0.400s**. User-reported winning v7 score: **2.7389s**, 7.2% faster than v5 2.9522s. v8 keeps v7 scanner/identity/reducer and changes only event selection: a completed seen/repeat bitmap pass routes every member of a repeated bucket through exact dedup and skips table work for unflagged singleton buckets. Invalid earliest records remain in selection; full IDs resolve false repeats and hash collisions.
 

@@ -2,10 +2,33 @@
 #include "../src/main.cpp"
 #undef main
 #include <cassert>
+#include <deque>
 #include <random>
 
 int main() {
     std::mt19937_64 random(490235);
+    std::deque<std::string> ids;
+    std::unordered_map<std::string,uint32_t> expected;
+    std::vector<SV> exact_names;
+    v5::PackedIds packed;
+    for (size_t i=0;i<10000;++i) {
+        std::string id="u";
+        for (size_t n=random()%45;n;--n) id.push_back(char(random()%256));
+        ids.push_back(id);
+        auto [it,inserted]=expected.emplace(id,uint32_t(expected.size()));
+        if (inserted) exact_names.push_back(ids.back());
+        uint64_t key=v5::alias_key(ids.back());
+        auto [value,added]=packed.add(key,it->second,[&](uint32_t previous) { return exact_names[previous]==id; });
+        assert(value==it->second && added==inserted);
+    }
+    v5::PackedIds collided;
+    std::array<SV,3> collision_names{"long-a","long-b","long-c"};
+    for (uint32_t i=0;i<3;++i) {
+        auto [value,added]=collided.add(uint64_t(1)<<63,i,[&](uint32_t previous) { return collision_names[previous]==collision_names[i]; });
+        assert(value==i && added);
+    }
+    auto [same,added]=collided.add(uint64_t(1)<<63,3,[&](uint32_t previous) { return collision_names[previous]=="long-b"; });
+    assert(same==1 && !added);
     for (size_t width:{32,64}) {
         if (width==64 && !__builtin_cpu_supports("avx512bw")) continue;
         for (size_t trial=0;trial<1000;++trial) {

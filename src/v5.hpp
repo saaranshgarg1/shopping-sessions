@@ -1,6 +1,7 @@
 #pragma once
 #include "reduce.hpp"
 #include "scanner.hpp"
+#include "packed_ids.hpp"
 #include <bit>
 #include <condition_variable>
 #include <functional>
@@ -127,6 +128,7 @@ inline size_t vector_width() {
 
 struct Ref { uint32_t source,row; };
 struct Descriptor { uint64_t hash; Ref ref; };
+struct AliasDescriptor { uint64_t key; Ref ref; };
 static_assert(sizeof(Descriptor)==16 && sizeof(Ref)==8);
 struct EventRow {
     uint32_t id_offset,id_length,ingest_offset,user_offset,user_length,time,purchase;
@@ -142,7 +144,7 @@ struct Source {
     std::vector<LinkRow> links;
     std::vector<Purchase> purchases;
     std::array<std::vector<Descriptor>,PARTS> descriptors;
-    std::array<std::vector<Ref>,PARTS> aliases;
+    std::array<std::vector<AliasDescriptor>,PARTS> aliases;
     uint32_t purchase_base=0;
     uint64_t rows=0;
 };
@@ -231,30 +233,17 @@ inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,co
 }
 struct SelectionStats { uint64_t descriptors=0,comparisons=0,duplicates=0; size_t largest=0; };
 inline SelectionStats select(std::vector<Source>& sources,size_t shard) {
+    std::vector<Descriptor> descriptors;
     size_t count=0; for (const auto& s:sources) count+=s.descriptors[shard].size();
+    descriptors.reserve(count);
+    for (auto& s:sources) {
+        auto& block=s.descriptors[shard];
+        descriptors.insert(descriptors.end(),block.begin(),block.end());
+        std::vector<Descriptor>().swap(block);
+    }
     SelectionStats stats{count,0,0,count};
     if (!count) return stats;
     if (count>=UINT32_MAX) throw std::runtime_error("event shard exceeds 32-bit row count");
-    size_t bits=16; while (bits<count*8) bits*=2;
-    std::vector<uint64_t> seen(bits/64+1),repeat(seen.size());
-    // Complete repeat detection first; every member of a repeated bucket takes exact dedup.
-    for (const auto& s:sources) for (const auto& d:s.descriptors[shard]) {
-        size_t bucket=(d.hash>>7)&(bits-1);
-        uint64_t bit=uint64_t(1)<<(bucket&63);
-        repeat[bucket>>6]|=seen[bucket>>6]&bit;
-        seen[bucket>>6]|=bit;
-    }
-    std::vector<Descriptor> descriptors;
-    descriptors.reserve(count/4);
-    for (auto& s:sources) {
-        auto& block=s.descriptors[shard];
-        for (const auto& d:block) {
-            size_t bucket=(d.hash>>7)&(bits-1);
-            if (repeat[bucket>>6]&(uint64_t(1)<<(bucket&63))) descriptors.push_back(d);
-        }
-        std::vector<Descriptor>().swap(block);
-    }
-    count=descriptors.size();
     size_t capacity=16; while (capacity<count+count/2) capacity*=2;
     std::vector<uint32_t> table(capacity);
     for (size_t i=0;i<count;++i) {
@@ -294,7 +283,7 @@ inline void handle(Source& s,uint32_t row,uint32_t local,uint32_t shard) {
         else { r.a_offset=local; r.a_length=shard; }
     }
 }
-struct IdShard { FlatIds table; std::vector<SV> names; uint32_t base=0; };
+struct IdShard { PackedIds packed; std::vector<SV> names; uint32_t base=0; };
 struct People {
     std::array<IdShard,PARTS> shards;
     std::vector<uint32_t> parent;
@@ -309,7 +298,11 @@ struct People {
     void build(std::vector<Source>& sources,Pool& pool) {
         pool.run(sources.size(),[&](size_t j,size_t) {
             auto& s=sources[j];
-            auto add=[&](uint32_t row) { SV id=alias(s,row); s.aliases[(hash(id)>>57)&(PARTS-1)].push_back({uint32_t(j),row}); };
+            for (auto& bucket:s.aliases) bucket.reserve((s.events.size()+s.clicks.size()+s.links.size()*2)/PARTS+8);
+            auto add=[&](uint32_t row) {
+                uint64_t key=alias_key(alias(s,row));
+                s.aliases[(mix(key)>>57)&(PARTS-1)].push_back({key,{uint32_t(j),row}});
+            };
             if (s.kind==EVENTS) { for (uint32_t i=0;i<s.events.size();++i) if (s.events[i].time!=UINT32_MAX) add(i); }
             else if (s.kind==CLICKS) { for (uint32_t i=0;i<s.clicks.size();++i) add(i); }
             else {
@@ -320,17 +313,18 @@ struct People {
         pool.run(PARTS,[&](size_t p,size_t) {
             auto& shard=shards[p];
             size_t count=0; for (const auto& s:sources) count+=s.aliases[p].size();
-            shard.table.reserve(std::min<size_t>(count/24+64,65536));
+            shard.packed.reserve(std::min<size_t>(count/24+64,65536));
             for (auto& s:sources) {
                 auto& refs=s.aliases[p];
-                for (auto ref:refs) {
-                    auto& owner=sources[ref.source]; SV id=alias(owner,ref.row);
-                    if (shard.names.size()>=UINT32_MAX) throw std::runtime_error("alias shard exceeds 32-bit handles");
-                    auto [v,added]=shard.table.insert(id,uint32_t(shard.names.size()));
-                    if (added) shard.names.push_back(id);
+                for (const auto& descriptor:refs) {
+                    auto ref=descriptor.ref; auto& owner=sources[ref.source];
+                    if (shard.names.size()>=UINT32_MAX-1) throw std::runtime_error("alias shard exceeds 32-bit handles");
+                    auto [v,added]=shard.packed.add(descriptor.key,uint32_t(shard.names.size()),
+                        [&](uint32_t previous) { return shard.names[previous]==alias(owner,ref.row); });
+                    if (added) shard.names.push_back(alias(owner,ref.row));
                     handle(owner,ref.row,v,uint32_t(p));
                 }
-                std::vector<Ref>().swap(refs);
+                std::vector<AliasDescriptor>().swap(refs);
             }
         });
         size_t total=0;
@@ -352,7 +346,7 @@ struct People {
         }
         for (uint32_t i=0;i<total;++i) parent[i]=root(i);
         std::vector<uint8_t>().swap(rank);
-        for (auto& shard:shards) { shard.table=FlatIds{}; std::vector<SV>().swap(shard.names); }
+        for (auto& shard:shards) { shard.packed=PackedIds{}; std::vector<SV>().swap(shard.names); }
     }
     uint32_t person(uint32_t local,uint32_t shard) const { return parent[index(local,shard)]; }
 };
