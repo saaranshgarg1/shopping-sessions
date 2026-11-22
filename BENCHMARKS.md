@@ -52,7 +52,7 @@ Container executed successfully with network disabled, read-only root and input,
 
 ## HPC rehearsal
 
-Fresh workspace: `/scratch/user_data/saide/2024aib1015/shopping-v5-20261122.LPJkZS`. Slurm job **39970** requests eight CPUs and 24G, runs AVX2 versus AVX-512 correctness/timing on fresh v5 dev, practice and final sets. CPU feature support confirmed remotely. Existing HPC code/data remain untouched. Results pending when submission was prepared; HPC results are not official scorer results.
+Fresh workspace: `/scratch/user_data/saide/2024aib1015/shopping-v5-20261122.LPJkZS`. Slurm job **39970** requests eight CPUs and 24G, runs AVX2 versus AVX-512 correctness/timing on fresh v5 dev, practice and final sets. CPU feature support confirmed remotely. Existing HPC code/data remain untouched. Dev/practice tables passed exact reference comparisons. Warm Lustre practice medians were AVX2 **19.817s** and AVX-512 **18.633s**; final rehearsal remains running. These shared-filesystem numbers are slower than laptop tmpfs measurements and are not official scorer results.
 
 ## Next acceptance gate
 
