@@ -266,6 +266,26 @@ int main() {
     }
     assert(over64 >= 100 && whales >= 90);
 
+    // Sparse purchases: only recorded purchase rows are revisited, then a purchase-free
+    // rerun on the same Scratch must not see stale indices.
+    {
+        std::mt19937_64 rng(99);
+        std::vector<BinEvent> ev;
+        for (int i = 0; i < 800; ++i) ev.push_back({uint32_t(rng() % (14 * DAY)), 0});
+        std::vector<Purchase> pur{{0, 500}, {3, 700}};
+        ev[123].purchase = 1; ev[456].purchase = 2;
+        std::shuffle(ev.begin(), ev.end(), rng);
+        run_case(ev, pur, {}, 0, categories, 6, 0, 14, sc, daily, stats);
+        bool saw_cat = false;
+        for (const Daily& d : daily) saw_cat |= d.has_category;
+        assert(saw_cat);
+        auto d0 = daily;
+        for (auto& e : ev) e.purchase = 0;
+        run_case(ev, pur, {}, 0, categories, 6, 0, 14, sc, daily, stats);
+        for (const Daily& d : daily) assert(!d.has_category);
+        assert(d0.size() == daily.size());
+    }
+
     // Scratch reuse across people must not leak state: rerun case 0 after everything.
     {
         std::vector<Purchase> pur;

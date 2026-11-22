@@ -29,14 +29,27 @@ struct PackedIds {
             slots[at]=slot;
         }
     }
-    template<class Equal> std::pair<uint32_t,bool> add(uint64_t key,uint32_t value,Equal equal) {
-        if (slots.empty() || (used+1)*3>slots.size()*2) reserve(std::max<size_t>(16,slots.size()));
-        size_t at=mix(key)&(slots.size()-1);
-        while (slots[at].value) {
-            if (slots[at].key==key && (!(key>>63) || equal(slots[at].value-1))) return {slots[at].value-1,false};
-            at=(at+1)&(slots.size()-1);
+    // Returns mix(key) so a batch can prefetch now and pass it to add_prehashed later.
+    uint64_t prefetch(uint64_t key) const {
+        uint64_t hashed=mix(key);
+        if (!slots.empty()) __builtin_prefetch(&slots[hashed&(slots.size()-1)]);
+        return hashed;
+    }
+    // hit path does not grow: `hashed` is mix(key), unaffected by rehashing.
+    template<class Equal> std::pair<uint32_t,bool> add_prehashed(uint64_t key,uint32_t value,uint64_t hashed,Equal equal) {
+        for (;;) {
+            if (slots.empty()) { reserve(16); continue; }
+            size_t at=hashed&(slots.size()-1);
+            while (slots[at].value) {
+                if (slots[at].key==key && (!(key>>63) || equal(slots[at].value-1))) return {slots[at].value-1,false};
+                at=(at+1)&(slots.size()-1);
+            }
+            if ((used+1)*3>slots.size()*2) { reserve(slots.size()); continue; }
+            slots[at]={key,value+1}; ++used; return {value,true};
         }
-        slots[at]={key,value+1}; ++used; return {value,true};
+    }
+    template<class Equal> std::pair<uint32_t,bool> add(uint64_t key,uint32_t value,Equal equal) {
+        return add_prehashed(key,value,mix(key),equal);
     }
 };
 } // namespace v5

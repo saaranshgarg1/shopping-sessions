@@ -236,47 +236,40 @@ inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,co
 }
 struct SelectionStats { uint64_t descriptors=0,comparisons=0,duplicates=0; size_t largest=0; };
 inline SelectionStats select(std::vector<Source>& sources,size_t shard) {
+    std::vector<Descriptor> descriptors;
     size_t count=0; for (const auto& s:sources) count+=s.descriptors[shard].size();
+    descriptors.reserve(count);
+    for (auto& s:sources) {
+        auto& block=s.descriptors[shard];
+        descriptors.insert(descriptors.end(),block.begin(),block.end());
+        std::vector<Descriptor>().swap(block);
+    }
     SelectionStats stats{count,0,0,count};
     if (!count) return stats;
     if (count>=UINT32_MAX) throw std::runtime_error("event shard exceeds 32-bit row count");
-    // Large-shard exact tables stay in private cache rather than competing for shared LLC.
-    size_t parts=count>32768 ? 16 : 1;
-    std::array<std::vector<Descriptor>,16> buckets;
-    for (size_t p=0;p<parts;++p) buckets[p].reserve(count/parts+count/parts/4+16);
-    for (auto& source:sources) {
-        auto& block=source.descriptors[shard];
-        for (const auto& d:block) buckets[(mix(d.hash)>>32)&(parts-1)].push_back(d);
-        std::vector<Descriptor>().swap(block);
-    }
+    size_t capacity=16; while (capacity<count+count/2) capacity*=2;
     struct Slot { uint64_t key=0; uint32_t winner=0; };
-    std::vector<Slot> table;
-    for (size_t p=0;p<parts;++p) {
-        const auto& descriptors=buckets[p];
-        size_t capacity=16; while (capacity<descriptors.size()+descriptors.size()/2) capacity*=2;
-        table.assign(capacity,{});
-        for (size_t i=0;i<descriptors.size();++i) {
-            const auto& d=descriptors[i];
-            size_t at=mix(d.hash)&(capacity-1);
-            while (table[at].winner) {
-                if (d.hash==table[at].key) {
-                    const auto& old_d=descriptors[table[at].winner-1];
-                    auto& source=sources[d.ref.source]; auto& row=source.events[d.ref.row];
-                    auto& old_source=sources[old_d.ref.source]; auto& old=old_source.events[old_d.ref.row];
-                    ++stats.comparisons;
-                    if (!(d.hash>>63) || event_id(source,row)==event_id(old_source,old)) {
-                        ++stats.duplicates;
-                        if (std::memcmp(source.chunk.begin+row.ingest_offset,old_source.chunk.begin+old.ingest_offset,20)<0) {
-                            old.time=UINT32_MAX; table[at].winner=uint32_t(i+1);
-                        } else row.time=UINT32_MAX;
-                        break;
-                    }
+    std::vector<Slot> table(capacity);
+    for (size_t i=0;i<count;++i) {
+        const auto& d=descriptors[i];
+        size_t at=mix(d.hash)&(capacity-1);
+        while (table[at].winner) {
+            if (d.hash==table[at].key) {
+                const auto& old_d=descriptors[table[at].winner-1];
+                auto& source=sources[d.ref.source]; auto& row=source.events[d.ref.row];
+                auto& old_source=sources[old_d.ref.source]; auto& old=old_source.events[old_d.ref.row];
+                ++stats.comparisons;
+                if (!(d.hash>>63) || event_id(source,row)==event_id(old_source,old)) {
+                    ++stats.duplicates;
+                    if (std::memcmp(source.chunk.begin+row.ingest_offset,old_source.chunk.begin+old.ingest_offset,20)<0) {
+                        old.time=UINT32_MAX; table[at].winner=uint32_t(i+1);
+                    } else row.time=UINT32_MAX;
+                    break;
                 }
-                at=(at+1)&(capacity-1);
             }
-            if (!table[at].winner) table[at]={d.hash,uint32_t(i+1)};
+            at=(at+1)&(capacity-1);
         }
-        std::vector<Descriptor>().swap(buckets[p]);
+        if (!table[at].winner) table[at]={d.hash,uint32_t(i+1)};
     }
     return stats;
 }
@@ -346,10 +339,14 @@ struct People {
             shard.packed.reserve(std::min<size_t>(count/24+64,65536));
             for (auto& s:sources) {
                 auto& refs=s.aliases[p];
-                for (const auto& descriptor:refs) {
+                std::array<uint64_t,16> hashes{};
+                for (size_t i=0;i<std::min<size_t>(refs.size(),16);++i) hashes[i]=shard.packed.prefetch(refs[i].key);
+                for (size_t i=0;i<refs.size();++i) {
+                    const auto& descriptor=refs[i]; uint64_t hashed=hashes[i&15];
+                    if (i+16<refs.size()) hashes[i&15]=shard.packed.prefetch(refs[i+16].key);
                     auto ref=descriptor.ref; auto& owner=sources[ref.source];
                     if (shard.names.size()>=UINT32_MAX-1) throw std::runtime_error("alias shard exceeds 32-bit handles");
-                    auto [v,added]=shard.packed.add(descriptor.key,uint32_t(shard.names.size()),
+                    auto [v,added]=shard.packed.add_prehashed(descriptor.key,uint32_t(shard.names.size()),hashed,
                         [&](uint32_t previous) { return shard.names[previous]==alias(owner,ref.row); });
                     if (added) shard.names.push_back(alias(owner,ref.row));
                     if (owner.kind==EVENTS) {

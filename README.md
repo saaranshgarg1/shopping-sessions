@@ -1,4 +1,4 @@
-# Shopping Sessions v13 — exact native pipeline
+# Shopping Sessions v14 — exact native pipeline
 
 C++20 candidate for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
 
@@ -39,8 +39,9 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 - ISA-specialized whole-chunk scanner separates quote masks from comma/LF masks, removing per-vector indirect calls and transition overhead.
 - Successful production execution is silent. Diagnostic stage timing is compile-time opt-in (`-DSS_PROFILE=1`), absent from submitted image.
 - Persistent worker pool; LF-aligned mapped CSV chunks. Runtime AVX2/AVX-512F/BW dispatch, bounded loads at mapping ends, exact whole-field quote validation. CR and spaces remain data.
-- Common 13-digit F3 timestamps use bounded 8+4+1-byte loads, SWAR ASCII checks and fixed decimal-pair arithmetic; long padded timestamps retain checked fallback.
-- Large event-selection shards split into 16 exact subpartitions so key/winner tables fit private cache; no probabilistic filtering or dropped candidates.
+- Restored v12 timestamp and selection layout after v13 regression (2.1702s versus v12 2.0363s).
+- Identity descriptors prefetch 16 future table positions with cached mixed keys; repeated-key hits no longer trigger table growth checks/rehashes.
+- Category aggregation visits only purchase-bearing event indices collected during bin folding, avoiding a second full event scan.
 - Checked F1/F2/F3 timestamps and purchase amounts. Valid ingest F1 copies compare chronologically by bytes. Calendar caching and date-based lateness shortcut preserve 24-hour boundaries.
 - Producer-local 28-byte event rows plus 16-byte hash/chunk/row descriptors. One worker owns each exact event-ID shard. Full length/bytes resolve hash collisions; an invalid earliest copy suppresses later valid copies across users.
 - Exact shard-owned alias dictionaries, union-find, and bytewise minimum person names including link-only IDs. Compact surviving rows route to canonical person owners; purchases use sparse payloads.

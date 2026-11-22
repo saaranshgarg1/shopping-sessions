@@ -26,6 +26,7 @@ struct Scratch {
     std::vector<uint32_t> bmin, bmax, bcount, bsess, occ;
     std::vector<int64_t> brev;
     std::vector<int64_t> sstart, srev, sevents;
+    std::vector<uint32_t> buy_ev; // purchase-bearing event indices, avoids a second full scan
     std::vector<DayAcc> day;
     std::vector<uint32_t> day_touched;
     std::vector<uint64_t> cat_key;
@@ -73,7 +74,10 @@ inline void reduce(const BinEvent* events, size_t event_count,
             if (events[i].time > sc.bmax[b]) sc.bmax[b] = events[i].time;
             ++sc.bcount[b];
         }
-        if (events[i].purchase) sc.brev[b] += purchases[events[i].purchase - 1].price;
+        if (events[i].purchase) {
+            sc.brev[b] += purchases[events[i].purchase - 1].price;
+            sc.buy_ev.push_back(uint32_t(i));
+        }
     }
     std::sort(sc.occ.begin(), sc.occ.end());
     sc.sstart.clear(); sc.srev.clear(); sc.sevents.clear();
@@ -118,10 +122,8 @@ inline void reduce(const BinEvent* events, size_t event_count,
         if (!sc.cat_key[at]) { sc.cat_key[at] = key; sc.cat_val[at] = 0; sc.cat_used.push_back(uint32_t(at)); }
         return sc.cat_val[at];
     };
-    for (size_t i = 0; i < event_count; ++i) {
-        if (!events[i].purchase) continue;
-        uint32_t b = uint32_t(events[i].time / ss::GAP);
-        if (b >= bin_count) continue;
+    for (uint32_t i : sc.buy_ev) {
+        uint32_t b = uint32_t(events[i].time / ss::GAP); // in range: only such events were recorded
         int64_t d = ss::day_of(window_start + sc.sstart[sc.bsess[b]]) - first_day;
         if (d < 0 || d >= int64_t(days)) continue;
         const Purchase& p = purchases[events[i].purchase - 1];
@@ -202,6 +204,7 @@ inline void reduce(const BinEvent* events, size_t event_count,
     sc.day_touched.clear();
     for (uint32_t at : sc.cat_used) sc.cat_key[at] = 0;
     sc.cat_used.clear();
+    sc.buy_ev.clear();
     for (uint32_t l : sc.by_l_touched) sc.by_l[l] = nullptr;
     sc.by_l_touched.clear();
     for (auto& t : sc.cov_touched) sc.campaign_slot[t.first]=SIZE_MAX;

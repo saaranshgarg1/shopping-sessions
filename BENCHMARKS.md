@@ -1,6 +1,18 @@
-# v13 timestamp and private-cache selection candidate
+# v14 prefetched identity and sparse purchase candidate
 
 ## Current iteration
+
+Corrected official user-reported scores: best v12 **2.0363s**, v13 **2.1702s**. v14 removes v13 timestamp/subpartition changes and keeps v12 base. Target remains **below0.400s**.
+
+v14 overlaps identity-table memory latency with a16-record lookahead prefetch ring, passes cached mixed keys to exact lookup, and grows packed tables only after actual missing-key probes. Category reduction stores purchase-bearing event indices during first bin pass and avoids a second full event scan. DeepSeek default subagents implemented and tested these two paths. All parsed bytes, linked names, dedup and attribution remain exact; runtime silent.
+
+Gate: finalnativeunitchecks, packedcollision/growthtests, sparsepurchase/reusedscratchtests, all36fixtures, four differential datasets and silent offline dev container passed. Focused review found no confirmed defects. Official v14 timing pending.
+
+---
+
+# Rejected v13 timestamp and private-cache selection candidate
+
+## Previous iteration
 
 User reports v12 improved over v11 **2.1549s**; exact v12 score not supplied yet. Target remains **below0.400s**.
 

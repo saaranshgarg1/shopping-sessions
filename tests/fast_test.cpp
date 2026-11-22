@@ -36,32 +36,6 @@ int main() {
         bool ok=timestamp(value,slow);
         assert(cache.parse(value,fast)==ok && (!ok || fast==slow));
     }
-    auto check_time=[&](SV value) {
-        int64_t fast=0,slow=0; bool ok=timestamp(value,slow);
-        assert(cache.parse(value,fast)==ok && (!ok || fast==slow));
-    };
-    for (SV value:{"0000000000000","1791071890000","9999999999999"}) check_time(value);
-    for (size_t position=0;position<13;++position) for (unsigned byte=0;byte<256;++byte) {
-        std::string value="1791071890000"; value[position]=char(byte); check_time(value);
-    }
-    for (size_t n=0;n<100000;++n) {
-        std::string value=std::to_string(rng()%10000000000000ULL);
-        value.insert(0,13-value.size(),'0'); check_time(value);
-        if (n%3==0) for (char& c:value) c=char(rng()%256);
-        else value[rng()%value.size()]=char(rng()%256);
-        check_time(value);
-    }
-    for (size_t width:{20,25,70}) {
-        std::string value(width-13,'0'); value+="1791071890000"; check_time(value);
-    }
-    for (SV value:{"2028-02-29T00:00:00Z","2028-02-29T23:59:59Z","2028-02-29T23:59:59+23:59",
-                   "2028-02-29T23:59:59-23:59","2028-02-29T23:59:59+24:00","2028-02-29T23:59:59+05:60",
-                   "2028-02-29T24:00:00Z","2028-02-29T23:59:60Z","2028-02-29T23:59:59z","0000-02-29T00:00:00Z"}) check_time(value);
-    size_t page=size_t(sysconf(_SC_PAGESIZE));
-    char* memory=static_cast<char*>(mmap(nullptr,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0));
-    assert(memory!=MAP_FAILED && mprotect(memory+page,page,PROT_NONE)==0);
-    std::memcpy(memory+page-13,"1791071890000",13); check_time(SV(memory+page-13,13));
-    munmap(memory,page*2);
     for (size_t n=0;n<100000;++n) {
         std::string value(n%2 ? "2028-02-29T23:59:59Z" : "2028-02-29T23:59:59+05:30");
         if (n%3) value[rng()%value.size()]=char(rng()%256);
