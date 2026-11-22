@@ -127,15 +127,11 @@ inline size_t vector_width() {
 }
 
 struct Ref { uint32_t source,row; };
-struct Descriptor {
-    static constexpr uint32_t SOURCE_MASK=UINT32_MAX>>1;
-    uint64_t hash;
-    Ref ref;
-    uint32_t source() const { return ref.source&SOURCE_MASK; }
-    bool needs_byte_comparison() const { return ref.source>SOURCE_MASK; }
-};
+// The containing source owns every row in this block. Hash matches are
+// candidates only: event_id() confirms equality even for short IDs.
+struct Descriptor { uint32_t hash,row; };
 struct AliasDescriptor { uint64_t key; uint32_t row, event_time; };
-static_assert(sizeof(Descriptor)==16 && sizeof(Ref)==8);
+static_assert(sizeof(Descriptor)==8 && sizeof(Ref)==8);
 struct EventRow {
     uint32_t id_offset,id_length,ingest_offset,user_offset,user_length,time,purchase;
 };
@@ -146,6 +142,7 @@ struct Source {
     Chunk chunk;
     Kind kind;
     std::vector<EventRow> events;
+    std::vector<uint64_t> event_alias_keys;
     std::vector<ClickRow> clicks;
     std::vector<LinkRow> links;
     std::vector<Purchase> purchases;
@@ -181,7 +178,7 @@ struct IngestCache {
         return date.midnight-DAY+tod>time;
     }
 };
-template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const sprint::Lookup& products,const sprint::Lookup& campaigns,
+template<int WIDTH> inline void scan_width(Source& source,const sprint::Lookup& products,const sprint::Lookup& campaigns,
                  int64_t start,int64_t end) {
     v6::Scanner<WIDTH> scanner(source.chunk.begin,source.chunk.end);
     sprint::DateCache cache;
@@ -189,6 +186,7 @@ template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const s
     if (source.kind==EVENTS) {
         size_t estimate=size_t(source.chunk.end-source.chunk.begin)/80;
         source.events.reserve(estimate);
+        source.event_alias_keys.reserve(estimate);
         source.purchases.reserve(estimate/24+8);
         for (auto& bucket:source.descriptors) bucket.reserve(estimate/PARTS+8);
         scanner.template run<7>([&](bool parsed,const std::array<SV,7>& f) {
@@ -211,11 +209,10 @@ template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const s
                     row.purchase=uint32_t(source.purchases.size());
                 }
             }
-            uint64_t key=event_key(f[0]);
-            uint64_t mixed=mix(key);
-            uint32_t tagged_source=index | (uint32_t(key>>63)<<31);
-            source.descriptors[(mixed>>57)&(PARTS-1)].push_back({mixed,{tagged_source,uint32_t(source.events.size())}});
+            uint64_t mixed=mix(event_key(f[0]));
+            source.descriptors[(mixed>>57)&(PARTS-1)].push_back({uint32_t(mixed),uint32_t(source.events.size())});
             source.events.push_back(row);
+            source.event_alias_keys.push_back(row.time==UINT32_MAX ? 0 : alias_bucket_key(alias_key(f[1])));
         });
     } else if (source.kind==CLICKS) {
         source.clicks.reserve((source.chunk.end-source.chunk.begin)/64);
@@ -236,53 +233,66 @@ template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const s
         });
     }
 }
-inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,const sprint::Lookup& campaigns,
+inline void scan(Source& source,uint32_t,const sprint::Lookup& products,const sprint::Lookup& campaigns,
                  int64_t start,int64_t end,size_t width) {
-    if (width==64) scan_width<64>(source,index,products,campaigns,start,end);
-    else scan_width<32>(source,index,products,campaigns,start,end);
+    if (width==64) scan_width<64>(source,products,campaigns,start,end);
+    else scan_width<32>(source,products,campaigns,start,end);
 }
 struct SelectionStats { uint64_t descriptors=0,comparisons=0,duplicates=0; size_t largest=0; };
-inline SelectionStats select(std::vector<Source>& sources,size_t shard) {
-    size_t count=0;
-    for (const auto& source:sources) count+=source.descriptors[shard].size();
-    SelectionStats stats{count,0,0,count};
-    if (!count) return stats;
+template<class Winner, unsigned RowBits>
+inline void select_blocks(std::vector<Source>& sources,size_t shard,SelectionStats& stats) {
     size_t capacity=16;
-    while (capacity<count+count/2) capacity*=2;
+    while (capacity<stats.descriptors+stats.descriptors/2) capacity*=2;
     const size_t mask=capacity-1;
-    struct Slot { uint64_t key=0; Ref winner{}; };
+    constexpr Winner row_mask=(Winner(1)<<RowBits)-1;
+    struct Slot { uint32_t key=0; Winner winner=0; };
     std::vector<Slot> table(capacity);
-    for (auto& block_source:sources) {
-        auto& block=block_source.descriptors[shard];
+    for (size_t source_index=0;source_index<sources.size();++source_index) {
+        auto& source=sources[source_index];
+        auto& block=source.descriptors[shard];
+        const Winner source_base=Winner(source_index)<<RowBits;
         for (size_t i=0;i<block.size();++i) {
             constexpr size_t lookahead=12;
             if (i+lookahead<block.size())
                 __builtin_prefetch(&table[block[i+lookahead].hash&mask],1,3);
             const Descriptor& candidate=block[i];
             size_t at=candidate.hash&mask;
-            while (table[at].winner.row) {
+            const Winner candidate_ref=source_base+(Winner(candidate.row)+1);
+            while (table[at].winner) {
                 if (candidate.hash==table[at].key) {
-                    const Ref winner=table[at].winner;
-                    auto& source=sources[candidate.source()];
-                    auto& row=source.events[candidate.ref.row];
-                    auto& old_source=sources[winner.source];
-                    auto& old=old_source.events[winner.row-1];
+                    const Winner winner=table[at].winner;
+                    auto& row=source.events[candidate.row];
+                    auto& old_source=sources[winner>>RowBits];
+                    auto& old=old_source.events[(winner&row_mask)-1];
                     ++stats.comparisons;
-                    if (!candidate.needs_byte_comparison() || event_id(source,row)==event_id(old_source,old)) {
+                    if (event_id(source,row)==event_id(old_source,old)) {
                         ++stats.duplicates;
                         if (std::memcmp(source.chunk.begin+row.ingest_offset,old_source.chunk.begin+old.ingest_offset,20)<0) {
                             old.time=UINT32_MAX;
-                            table[at].winner={candidate.source(),candidate.ref.row+1};
+                            table[at].winner=candidate_ref;
                         } else row.time=UINT32_MAX;
                         break;
                     }
                 }
                 at=(at+1)&mask;
             }
-            if (!table[at].winner.row)
-                table[at]={candidate.hash,{candidate.source(),candidate.ref.row+1}};
+            if (!table[at].winner) table[at]={candidate.hash,candidate_ref};
         }
         std::vector<Descriptor>().swap(block);
+    }
+}
+inline SelectionStats select(std::vector<Source>& sources,size_t shard) {
+    constexpr unsigned row_bits=20;
+    size_t count=0;
+    bool narrow=sources.size()<=(size_t(1)<<(32-row_bits));
+    for (const auto& source:sources) {
+        count+=source.descriptors[shard].size();
+        narrow&=source.events.size()<(size_t(1)<<row_bits);
+    }
+    SelectionStats stats{count,0,0,count};
+    if (count) {
+        if (narrow) select_blocks<uint32_t,row_bits>(sources,shard,stats);
+        else select_blocks<uint64_t,32>(sources,shard,stats);
     }
     return stats;
 }
@@ -334,19 +344,19 @@ struct People {
         pool.run(sources.size(),[&](size_t j,size_t) {
             auto& s=sources[j];
             for (auto& bucket:s.aliases) bucket.reserve((s.events.size()+s.clicks.size()+s.links.size()*2)/PARTS+8);
-            auto add=[&](uint32_t row,uint32_t event_time=0) {
-                uint64_t key=alias_key(alias(s,row));
-                s.aliases[(mix(key)>>57)&(PARTS-1)].push_back({key,row,event_time});
+            auto add=[&](uint32_t row,uint64_t key,uint32_t event_time=0) {
+                s.aliases[(key>>56)&(PARTS-1)].push_back({key,row,event_time});
             };
             if (s.kind==EVENTS) { for (uint32_t i=0;i<s.events.size();++i) if (s.events[i].time!=UINT32_MAX) {
                 const auto& event=s.events[i];
-                add(i,event.time | (event.purchase ? 0x80000000u : 0u));
+                add(i,s.event_alias_keys[i],event.time | (event.purchase ? 0x80000000u : 0u));
             } }
-            else if (s.kind==CLICKS) { for (uint32_t i=0;i<s.clicks.size();++i) add(i); }
+            else if (s.kind==CLICKS) { for (uint32_t i=0;i<s.clicks.size();++i) add(i,alias_bucket_key(alias_key(alias(s,i)))); }
             else {
                 if (s.links.size()>=UINT32_MAX/2) throw std::runtime_error("too many links in chunk");
-                for (uint32_t i=0;i<s.links.size()*2;++i) add(i);
+                for (uint32_t i=0;i<s.links.size()*2;++i) add(i,alias_bucket_key(alias_key(alias(s,i))));
             }
+            std::vector<uint64_t>().swap(s.event_alias_keys);
         });
         pool.run(PARTS,[&](size_t p,size_t) {
             auto& shard=shards[p];
@@ -363,7 +373,7 @@ struct People {
                 const uint32_t source_index=uint32_t(&s-sources.data());
                 for (const auto& descriptor:refs) {
                     if (shard.names.size()>=UINT32_MAX-1) throw std::runtime_error("alias shard exceeds 32-bit handles");
-                    auto [v,added]=shard.packed.add(descriptor.key,uint32_t(shard.names.size()),
+                    auto [v,added]=shard.packed.add_mixed(descriptor.key,uint32_t(shard.names.size()),
                         [&](uint32_t previous) { return shard.names[previous]==alias(s,descriptor.row); });
                     if (added) { shard.names.push_back(alias(s,descriptor.row)); shard.event_counts.push_back(0); shard.click_counts.push_back(0); }
                     if (s.kind==EVENTS) {
@@ -454,7 +464,7 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
         for (auto chunk:chunks(maps)) { Source source{}; source.chunk=chunk; source.kind=kind; sources.push_back(std::move(source)); }
     };
     add(event_maps,EVENTS); add(click_maps,CLICKS); add(link_maps,LINKS);
-    if (sources.size()>Descriptor::SOURCE_MASK) throw std::runtime_error("too many CSV chunks");
+    if (sources.size()>=UINT32_MAX) throw std::runtime_error("too many CSV chunks");
     timing("map/catalog");
     pool.run(sources.size(),[&](size_t j,size_t) { scan(sources[j],uint32_t(j),products,campaigns,start,end,width); });
     timing("scan/validate");

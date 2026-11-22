@@ -167,7 +167,7 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
     uint8_t db = 0;
     int dbits = 0;
 
-    auto flush_page = [&]() {
+    auto flush_page = [&](const int64_t* integer_page = nullptr) {
       std::vector<uint8_t> data;
       if (optional) {
         if (dbits > 0) { defs.push_back(db); db = 0; dbits = 0; }
@@ -183,7 +183,8 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
         defs.clear();
       }
       // Write level bytes and PLAIN values separately, avoiding a full page copy.
-      const size_t data_size = data.size() + vals.size();
+      const size_t value_size = integer_page ? page_rows * sizeof(int64_t) : vals.size();
+      const size_t data_size = data.size() + value_size;
       TCompact ph;
       ph.i32(1, PTYPE_DATA);
       ph.i32(2, int32_t(data_size));  // uncompressed_page_size
@@ -198,7 +199,11 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
       f.write(reinterpret_cast<const char*>(ph.b.data()),
               std::streamsize(ph.b.size()));
       if (!data.empty()) f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
-      if (!vals.empty()) f.write(reinterpret_cast<const char*>(vals.data()), std::streamsize(vals.size()));
+      if (value_size) {
+        const char* bytes = integer_page ? reinterpret_cast<const char*>(integer_page)
+                                         : reinterpret_cast<const char*>(vals.data());
+        f.write(bytes, std::streamsize(value_size));
+      }
       vals.clear();
       ch.num_values += int64_t(page_rows);
       const int64_t sz = int64_t(ph.b.size() + data_size);
@@ -208,15 +213,13 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
     };
 
     // Required INT64: PLAIN values are exactly the native little-endian bytes,
-    // so copy whole pages instead of encoding one byte at a time.
+    // so the column buffer can be written directly.
     if (c.kind == Column::INT64 && !optional && std::endian::native == std::endian::little) {
       constexpr size_t kPageValues = (4u << 20) / sizeof(int64_t);
       for (size_t i = 0; i < n; i += kPageValues) {
         const size_t cnt = (n - i < kPageValues) ? n - i : kPageValues;
-        vals.resize(cnt * sizeof(int64_t));
-        std::memcpy(vals.data(), c.integers.data() + i, cnt * sizeof(int64_t));
         page_rows = cnt;
-        flush_page();
+        flush_page(c.integers.data() + i);
       }
     } else {
       for (size_t i = 0; i < n; i++) {

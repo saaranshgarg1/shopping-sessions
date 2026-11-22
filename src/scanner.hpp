@@ -36,19 +36,10 @@ public: \
     bool more() const { return row<end; } \
     template<size_t N> __attribute__((target(ISA))) bool next(std::array<ss::SV,N>& fields) { \
         const char* start=row; \
-        const char* first_quote=nullptr; \
-        const char* last_quote=nullptr; \
-        size_t count=0, quote_count=0; \
-        bool valid=true; \
-        auto take_quotes=[&](uint64_t taken) { \
-            if (!taken) return; \
-            if (!quote_count) first_quote=block+std::countr_zero(taken); \
-            last_quote=block+63-std::countl_zero(taken); \
-            quote_count+=std::popcount(taken); \
-        }; \
+        size_t count=0, paired_quotes=0, scanned_quotes=0; \
         for (;;) { \
             while (!separators && cursor<end) { \
-                take_quotes(quotes); \
+                scanned_quotes+=std::popcount(quotes); \
                 block=cursor; \
                 if (size_t(end-cursor)>=WIDTH) { \
                     const auto masks=detail::MASKS(cursor); \
@@ -63,22 +54,30 @@ public: \
                 } \
             } \
             const char* at=end; \
+            unsigned bit=0; \
             if (separators) { \
-                const unsigned bit=std::countr_zero(separators); \
+                bit=std::countr_zero(separators); \
                 separators&=separators-1; \
-                const uint64_t before=(uint64_t(1)<<bit)-1; \
-                take_quotes(quotes&before); quotes&=~before; \
                 at=block+bit; \
-            } else { take_quotes(quotes); quotes=0; } \
-            ss::SV field(start,size_t(at-start)); \
-            if (quote_count) { \
-                if (quote_count!=2 || first_quote!=start || last_quote!=at-1) valid=false; \
-                else { field.remove_prefix(1); field.remove_suffix(1); } \
             } \
-            if (count<N) fields[count]=field; else valid=false; \
+            const size_t length=size_t(at-start); \
+            /* Each legal quoted field consumes two distinct quote bytes. \
+            A row-wide residual count catches every unpaired or interior quote. */ \
+            const bool wrapped=length>=2 && ((*start=='"') & (at[-1]=='"')); \
+            paired_quotes+=2*unsigned(wrapped); \
+            if (count<N) fields[count]=ss::SV(start+wrapped,length-2*unsigned(wrapped)); \
             ++count; \
-            if (at==end || *at=='\n') { row=at==end ? end : at+1; return valid && count==N; } \
-            start=at+1; quote_count=0; first_quote=last_quote=nullptr; \
+            if (at==end || *at=='\n') { \
+                if (at==end) { scanned_quotes+=std::popcount(quotes); quotes=0; row=end; } \
+                else { \
+                    uint64_t before=(uint64_t(1)<<bit)-1; \
+                    scanned_quotes+=std::popcount(quotes&before); \
+                    quotes&=~before; \
+                    row=at+1; \
+                } \
+                return count==N && paired_quotes==scanned_quotes; \
+            } \
+            start=at+1; \
         } \
     } \
     template<size_t N,class F> __attribute__((target(ISA), flatten)) void run(F&& fn) { \

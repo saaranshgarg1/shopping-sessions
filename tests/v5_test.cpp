@@ -112,7 +112,7 @@ int main() {
     assert(caught);
     pool.run(1,[&](size_t,size_t) { ++jobs; }); assert(jobs==11004);
 
-    // Force long IDs with a shared prefix into one tagged fingerprint bucket.
+    // Force long IDs with a shared prefix into one fingerprint bucket.
     std::vector<std::string> texts{
         "e-common-prefix-00000000000000000000000000000000,u1,1790812800000,2026-10-01T00:00:02Z,view,p,ignored\n",
         "e-common-prefix-00000000000000000000000000000000,u2,bad,2026-10-01T00:00:01Z,view,p,ignored\n",
@@ -126,7 +126,7 @@ int main() {
         v5::scan(s,uint32_t(i),products,campaigns,1790812800000,1790812800000+DAY,32);
         assert(s.events.size()==1);
         for (auto& shard:s.descriptors) shard.clear();
-        s.descriptors[0].push_back({mix((uint64_t(1)<<63)|42),{uint32_t(i)|(uint32_t(1)<<31),0}}); sources.push_back(std::move(s));
+        s.descriptors[0].push_back({42,0}); sources.push_back(std::move(s));
     }
     auto stats=v5::select(sources,0);
     assert(stats.duplicates==2 && stats.descriptors==4);
@@ -146,7 +146,7 @@ int main() {
         assert(s.events.size()==1);
         uint64_t key=v5::event_key(v5::event_id(s,s.events[0]));
         for (auto& shard:s.descriptors) shard.clear();
-        s.descriptors[0].push_back({mix(key),{i,0}}); short_sources.push_back(std::move(s));
+        s.descriptors[0].push_back({uint32_t(mix(key)),0}); short_sources.push_back(std::move(s));
     }
     auto short_stats=v5::select(short_sources,0);
     assert(short_stats.descriptors==4 && short_stats.duplicates==1);
@@ -163,8 +163,8 @@ int main() {
         v5::Source s{}; s.kind=v5::EVENTS; s.chunk={distinct[i].data(),distinct[i].data()+distinct[i].size()};
         v5::scan(s,i,products,campaigns,1790812800000,1790812800000+DAY,32);
         for (auto& shard:s.descriptors) shard.clear();
-        uint64_t h=i==0 ? 42 : i==1 ? 42+32*128 : 42+2*128;
-        s.descriptors[0].push_back({h,{i,0}}); false_hits.push_back(std::move(s));
+        uint32_t h=i==0 ? 42 : i==1 ? 42+32*128 : 42+2*128;
+        s.descriptors[0].push_back({h,0}); false_hits.push_back(std::move(s));
     }
     auto filtered=v5::select(false_hits,0);
     assert(filtered.descriptors==3 && filtered.duplicates==0);
@@ -180,7 +180,7 @@ int main() {
     assert(large[0].events.size()==40001);
     for (auto& shard:large[0].descriptors) shard.clear();
     for (uint32_t i=0;i<large[0].events.size();++i)
-        large[0].descriptors[0].push_back({mix(v5::event_key(v5::event_id(large[0],large[0].events[i]))),{0,i}});
+        large[0].descriptors[0].push_back({uint32_t(mix(v5::event_key(v5::event_id(large[0],large[0].events[i])))),i});
     auto large_stats=v5::select(large,0);
     assert(large_stats.descriptors==40001 && large_stats.duplicates==1);
     assert(large[0].events[123].time==UINT32_MAX && large[0].events.back().time==UINT32_MAX);
