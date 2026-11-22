@@ -30,7 +30,9 @@
 
 #pragma once
 
+#include <bit>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -205,38 +207,51 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
       page_rows = 0;
     };
 
-    for (size_t i = 0; i < n; i++) {
-      const bool present = c.valid.empty() || c.valid[i];
-      if (optional) {
-        db |= uint8_t(uint8_t(present) << dbits);
-        if (++dbits == 8) { defs.push_back(db); db = 0; dbits = 0; }
+    // Required INT64: PLAIN values are exactly the native little-endian bytes,
+    // so copy whole pages instead of encoding one byte at a time.
+    if (c.kind == Column::INT64 && !optional && std::endian::native == std::endian::little) {
+      constexpr size_t kPageValues = (4u << 20) / sizeof(int64_t);
+      for (size_t i = 0; i < n; i += kPageValues) {
+        const size_t cnt = (n - i < kPageValues) ? n - i : kPageValues;
+        vals.resize(cnt * sizeof(int64_t));
+        std::memcpy(vals.data(), c.integers.data() + i, cnt * sizeof(int64_t));
+        page_rows = cnt;
+        flush_page();
       }
-      if (present) {
-        switch (c.kind) {
-        case Column::STRING: {
-          const std::string_view s = c.string_views.empty() ? std::string_view(c.strings[i]) : c.string_views[i];
-          if (s.size() > UINT32_MAX) throw std::runtime_error("pq::write: string exceeds uint32 length");
-          put_u32(vals, uint32_t(s.size()));
-          if (!s.empty()) vals.insert(vals.end(), s.begin(), s.end());
-          break;
+    } else {
+      for (size_t i = 0; i < n; i++) {
+        const bool present = c.valid.empty() || c.valid[i];
+        if (optional) {
+          db |= uint8_t(uint8_t(present) << dbits);
+          if (++dbits == 8) { defs.push_back(db); db = 0; dbits = 0; }
         }
-        case Column::INT64: {
-          put_u64(vals, uint64_t(c.integers[i]));
-          break;
+        if (present) {
+          switch (c.kind) {
+          case Column::STRING: {
+            const std::string_view s = c.string_views.empty() ? std::string_view(c.strings[i]) : c.string_views[i];
+            if (s.size() > UINT32_MAX) throw std::runtime_error("pq::write: string exceeds uint32 length");
+            put_u32(vals, uint32_t(s.size()));
+            if (!s.empty()) vals.insert(vals.end(), s.begin(), s.end());
+            break;
+          }
+          case Column::INT64: {
+            put_u64(vals, uint64_t(c.integers[i]));
+            break;
+          }
+          case Column::DATE: {
+            const int64_t v = c.integers[i];
+            if (v < INT32_MIN || v > INT32_MAX)
+              throw std::runtime_error("pq::write: date out of range in column '" + c.name + "'");
+            put_u32(vals, uint32_t(int32_t(v)));
+            break;
+          }
+          }
         }
-        case Column::DATE: {
-          const int64_t v = c.integers[i];
-          if (v < INT32_MIN || v > INT32_MAX)
-            throw std::runtime_error("pq::write: date out of range in column '" + c.name + "'");
-          put_u32(vals, uint32_t(int32_t(v)));
-          break;
-        }
-        }
+        page_rows++;
+        if (vals.size() >= (4u << 20)) flush_page();
       }
-      page_rows++;
-      if (vals.size() >= (4u << 20)) flush_page();
+      if (page_rows > 0) flush_page();
     }
-    if (page_rows > 0) flush_page();
     if (n > 0) chunks.push_back(ch);
   }
 

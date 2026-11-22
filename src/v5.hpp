@@ -290,14 +290,17 @@ inline void handle(Source& s,uint32_t row,uint32_t local,uint32_t shard) {
 }
 struct RoutedEvent { uint32_t user,time,purchase; };
 struct RoutedClick { uint32_t user; Ref ref; };
-struct Routes {
-    std::array<std::vector<RoutedEvent>,PARTS> events;
-    std::array<std::vector<RoutedClick>,PARTS> clicks;
+struct Groups {
+    std::vector<size_t> event_offsets,click_offsets,event_positions,click_positions;
+    std::vector<BinEvent> events;
+    std::vector<Click> clicks;
 };
 struct IdShard {
     PackedIds packed; std::vector<SV> names; uint32_t base=0;
     std::vector<RoutedEvent> events;
     std::vector<RoutedClick> clicks;
+    std::vector<uint32_t> event_counts,click_counts;
+    std::vector<size_t> event_positions,click_positions;
 };
 struct People {
     std::array<IdShard,PARTS> shards;
@@ -305,6 +308,7 @@ struct People {
     std::vector<uint8_t> rank;
     std::vector<SV> names;
     std::vector<uint32_t> dense;
+    std::vector<size_t> event_counts,click_counts;
     std::array<std::vector<uint32_t>,PARTS> owners;
     uint32_t root(uint32_t i) {
         uint32_t r=i; while (parent[r]!=r) r=parent[r];
@@ -339,20 +343,16 @@ struct People {
             shard.packed.reserve(std::min<size_t>(count/24+64,65536));
             for (auto& s:sources) {
                 auto& refs=s.aliases[p];
-                std::array<uint64_t,16> hashes{};
-                for (size_t i=0;i<std::min<size_t>(refs.size(),16);++i) hashes[i]=shard.packed.prefetch(refs[i].key);
-                for (size_t i=0;i<refs.size();++i) {
-                    const auto& descriptor=refs[i]; uint64_t hashed=hashes[i&15];
-                    if (i+16<refs.size()) hashes[i&15]=shard.packed.prefetch(refs[i+16].key);
+                for (const auto& descriptor:refs) {
                     auto ref=descriptor.ref; auto& owner=sources[ref.source];
                     if (shard.names.size()>=UINT32_MAX-1) throw std::runtime_error("alias shard exceeds 32-bit handles");
-                    auto [v,added]=shard.packed.add_prehashed(descriptor.key,uint32_t(shard.names.size()),hashed,
+                    auto [v,added]=shard.packed.add(descriptor.key,uint32_t(shard.names.size()),
                         [&](uint32_t previous) { return shard.names[previous]==alias(owner,ref.row); });
-                    if (added) shard.names.push_back(alias(owner,ref.row));
+                    if (added) { shard.names.push_back(alias(owner,ref.row)); shard.event_counts.push_back(0); shard.click_counts.push_back(0); }
                     if (owner.kind==EVENTS) {
-                        const auto& event=owner.events[ref.row];
+                        const auto& event=owner.events[ref.row]; ++shard.event_counts[v];
                         shard.events.push_back({v,event.time,event.purchase ? owner.purchase_base+event.purchase : 0});
-                    } else if (owner.kind==CLICKS) shard.clicks.push_back({v,ref});
+                    } else if (owner.kind==CLICKS) { ++shard.click_counts[v]; shard.clicks.push_back({v,ref}); }
                     else handle(owner,ref.row,v,uint32_t(p));
                 }
                 std::vector<AliasDescriptor>().swap(refs);
@@ -363,16 +363,21 @@ struct People {
             shard.base=uint32_t(total); total+=shard.names.size();
             if (total>=UINT32_MAX) throw std::runtime_error("too many distinct aliases");
         }
-        parent.resize(total); rank.resize(total); names.resize(total);
+        parent.resize(total); rank.resize(total); names.resize(total); event_counts.resize(total); click_counts.resize(total);
         pool.run(PARTS,[&](size_t p,size_t) {
             const auto& s=shards[p];
-            for (size_t i=0;i<s.names.size();++i) { parent[s.base+i]=uint32_t(s.base+i); names[s.base+i]=s.names[i]; }
+            for (size_t i=0;i<s.names.size();++i) {
+                parent[s.base+i]=uint32_t(s.base+i); names[s.base+i]=s.names[i];
+                event_counts[s.base+i]=s.event_counts[i]; click_counts[s.base+i]=s.click_counts[i];
+            }
         });
         for (const auto& source:sources) for (const auto& link:source.links) {
             uint32_t x=root(index(link.a_offset,link.a_length)),y=root(index(link.b_offset,link.b_length));
             if (x==y) continue;
             if (rank[x]<rank[y]) std::swap(x,y);
             parent[y]=x; names[x]=std::min(names[x],names[y]);
+            event_counts[x]+=event_counts[y]; event_counts[y]=0;
+            click_counts[x]+=click_counts[y]; click_counts[y]=0;
             if (rank[x]==rank[y]) ++rank[x];
         }
         for (uint32_t i=0;i<total;++i) parent[i]=root(i);
@@ -385,30 +390,12 @@ struct People {
     }
     uint32_t person(uint32_t local,uint32_t shard) const { return parent[index(local,shard)]; }
 };
-inline void aggregate(size_t part,std::vector<Routes>& routes,const std::vector<Source>& sources,const People& people,
+inline void aggregate(size_t part,Groups& group,const People& people,
                       const std::vector<Purchase>& purchases,const Catalog& catalog,int64_t start,int64_t end,
                       int64_t first_day,size_t days,Scratch& scratch,std::vector<Stats>& stats,const fs::path& output) {
     const auto& keys=people.owners[part];
-    std::vector<size_t> counts(keys.size()),click_counts(keys.size());
-    for (const auto& route:routes) for (const auto& event:route.events[part]) ++counts[event.user];
-    for (auto& route:routes) for (auto& click:route.clicks[part]) {
-        if (counts[click.user]) ++click_counts[click.user];
-        else click.user=UINT32_MAX;
-    }
-    std::vector<size_t> offsets(keys.size()+1),coffsets(keys.size()+1);
-    for (size_t i=0;i<keys.size();++i) {
-        offsets[i+1]=offsets[i]+counts[i]; coffsets[i+1]=coffsets[i]+click_counts[i];
-        counts[i]=offsets[i]; click_counts[i]=coffsets[i];
-    }
-    std::vector<BinEvent> events(offsets.back()); std::vector<v5::Click> clicks(coffsets.back());
-    for (auto& route:routes) {
-        for (auto e:route.events[part]) events[counts[e.user]++]={e.time,e.purchase};
-        for (auto c:route.clicks[part]) if (c.user!=UINT32_MAX) {
-            const auto& source=sources[c.ref.source]; const auto& row=source.clicks[c.ref.row];
-            clicks[click_counts[c.user]++]={view(source,row.id_offset,row.id_length),row.time,row.campaign};
-        }
-        std::vector<RoutedEvent>().swap(route.events[part]); std::vector<RoutedClick>().swap(route.clicks[part]);
-    }
+    const auto& offsets=group.event_offsets; const auto& coffsets=group.click_offsets;
+    const auto& events=group.events; const auto& clicks=group.clicks;
     std::vector<UserRow> output_rows;
     std::vector<Daily> daily;
     for (size_t user=0;user<keys.size();++user) {
@@ -466,34 +453,51 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
         std::vector<Purchase>().swap(s.purchases);
         std::vector<EventRow>().swap(s.events); std::vector<LinkRow>().swap(s.links);
     });
-    for (const auto& owner:people.owners) if (owner.size()>size_t(UINT32_MAX>>7)+1)
-        throw std::runtime_error("owner partition exceeds packed route index");
-    std::vector<Routes> routes(PARTS);
+    std::array<Groups,PARTS> groups;
+    pool.run(PARTS,[&](size_t part,size_t) {
+        auto& group=groups[part]; const auto& keys=people.owners[part];
+        group.event_offsets.resize(keys.size()+1); group.click_offsets.resize(keys.size()+1);
+        for (size_t i=0;i<keys.size();++i) {
+            uint32_t root=keys[i];
+            group.event_offsets[i+1]=group.event_offsets[i]+people.event_counts[root];
+            group.click_offsets[i+1]=group.click_offsets[i]+(people.event_counts[root] ? people.click_counts[root] : 0);
+        }
+        group.events.resize(group.event_offsets.back()); group.clicks.resize(group.click_offsets.back());
+        group.event_positions=group.event_offsets; group.click_positions=group.click_offsets;
+    });
+    // Reserve disjoint alias ranges once per distinct ID, not once per event.
+    for (auto& shard:people.shards) {
+        shard.event_positions.resize(shard.event_counts.size()); shard.click_positions.resize(shard.click_counts.size());
+        for (uint32_t alias=0;alias<shard.event_counts.size();++alias) {
+            uint32_t root=people.parent[shard.base+alias]; auto& group=groups[mix(root)&(PARTS-1)];
+            uint32_t dense=people.dense[root];
+            shard.event_positions[alias]=group.event_positions[dense]; group.event_positions[dense]+=shard.event_counts[alias];
+            if (people.event_counts[root]) {
+                shard.click_positions[alias]=group.click_positions[dense]; group.click_positions[dense]+=shard.click_counts[alias];
+            }
+        }
+    }
     pool.run(PARTS,[&](size_t p,size_t) {
-        auto& shard=people.shards[p]; auto& route=routes[p];
-        std::array<size_t,PARTS> event_sizes{},click_sizes{};
-        for (auto& event:shard.events) {
+        auto& shard=people.shards[p];
+        for (const auto& event:shard.events) {
             uint32_t root=people.parent[shard.base+event.user];
-            size_t part=mix(root)&(PARTS-1); ++event_sizes[part];
-            event.user=uint32_t((uint64_t(people.dense[root])<<7)|part);
+            groups[mix(root)&(PARTS-1)].events[shard.event_positions[event.user]++]={event.time,event.purchase};
         }
-        for (auto& click:shard.clicks) {
+        for (const auto& click:shard.clicks) {
             uint32_t root=people.parent[shard.base+click.user];
-            size_t part=mix(root)&(PARTS-1); ++click_sizes[part];
-            click.user=uint32_t((uint64_t(people.dense[root])<<7)|part);
+            if (!people.event_counts[root]) continue;
+            const auto& source=sources[click.ref.source]; const auto& row=source.clicks[click.ref.row];
+            groups[mix(root)&(PARTS-1)].clicks[shard.click_positions[click.user]++]={view(source,row.id_offset,row.id_length),row.time,row.campaign};
         }
-        for (size_t part=0;part<PARTS;++part) {
-            route.events[part].reserve(event_sizes[part]); route.clicks[part].reserve(click_sizes[part]);
-        }
-        for (auto event:shard.events) route.events[event.user&(PARTS-1)].push_back({event.user>>7,event.time,event.purchase});
-        for (auto click:shard.clicks) route.clicks[click.user&(PARTS-1)].push_back({click.user>>7,click.ref});
         std::vector<RoutedEvent>().swap(shard.events); std::vector<RoutedClick>().swap(shard.clicks);
+        std::vector<uint32_t>().swap(shard.event_counts); std::vector<uint32_t>().swap(shard.click_counts);
+        std::vector<size_t>().swap(shard.event_positions); std::vector<size_t>().swap(shard.click_positions);
     });
     timing("person-route");
     std::vector<std::vector<Stats>> counters(threads,std::vector<Stats>(catalog.campaigns.size()*days));
     std::vector<Scratch> scratch(threads);
     pool.run(PARTS,[&](size_t p,size_t worker) {
-        aggregate(p,routes,sources,people,purchases,catalog,start,end,first_day,days,scratch[worker],counters[worker],output);
+        aggregate(p,groups[p],people,purchases,catalog,start,end,first_day,days,scratch[worker],counters[worker],output);
     });
     std::vector<Stats> stats(catalog.campaigns.size()*days);
     for (const auto& worker:counters) for (size_t i=0;i<stats.size();++i) stats[i]+=worker[i];

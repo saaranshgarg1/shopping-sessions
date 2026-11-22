@@ -69,4 +69,18 @@ values = ["x" * 1000 + str(i) for i in range(5001)]
 assert t.column("value").to_pylist() == values
 assert t.column("top_category").to_pylist() == [v if i % 7 else None for i, v in enumerate(values)]
 assert pq.read_metadata(f"{d}/multipage.parquet").num_row_groups == 1
-print("ALL PARQUET CHECKS PASSED (null padding, all-null, empty, multipage)")
+print("multipage.parquet: multipage values OK")
+
+# big_int64.parquet: 600k required int64 crossing the 4 MiB page flush.
+big = pq.read_table(f"{d}/big_int64.parquet")
+assert big.schema.names == ["id"], big.schema.names
+assert not big.schema.field("id").nullable
+assert big.num_rows == 600000, big.num_rows
+expected = [-2**63, 2**63 - 1, -1] + [i - 300000 for i in range(3, 600000)]
+assert big.column("id").to_pylist() == expected
+big_md = pq.read_metadata(f"{d}/big_int64.parquet")
+assert big_md.num_row_groups == 1
+assert big_md.row_group(0).column(0).total_compressed_size > (4 << 20)
+print("big_int64.parquet: 600k required int64 page-split values OK (min/max/negatives)")
+
+print("ALL PARQUET CHECKS PASSED (null padding, all-null, empty, multipage, big int64)")

@@ -26,7 +26,7 @@ struct Scratch {
     std::vector<uint32_t> bmin, bmax, bcount, bsess, occ;
     std::vector<int64_t> brev;
     std::vector<int64_t> sstart, srev, sevents;
-    std::vector<uint32_t> buy_ev; // purchase-bearing event indices, avoids a second full scan
+    std::vector<int32_t> sday; // cached window-relative day per session, -1 if out of range
     std::vector<DayAcc> day;
     std::vector<uint32_t> day_touched;
     std::vector<uint64_t> cat_key;
@@ -74,17 +74,16 @@ inline void reduce(const BinEvent* events, size_t event_count,
             if (events[i].time > sc.bmax[b]) sc.bmax[b] = events[i].time;
             ++sc.bcount[b];
         }
-        if (events[i].purchase) {
-            sc.brev[b] += purchases[events[i].purchase - 1].price;
-            sc.buy_ev.push_back(uint32_t(i));
-        }
+        if (events[i].purchase) sc.brev[b] += purchases[events[i].purchase - 1].price;
     }
     std::sort(sc.occ.begin(), sc.occ.end());
-    sc.sstart.clear(); sc.srev.clear(); sc.sevents.clear();
+    sc.sstart.clear(); sc.srev.clear(); sc.sevents.clear(); sc.sday.clear();
     uint32_t cur_max = 0;
     for (uint32_t b : sc.occ) {
         if (sc.sstart.empty() || sc.bmin[b] - cur_max > ss::GAP) {
             sc.sstart.push_back(sc.bmin[b]); sc.srev.push_back(0); sc.sevents.push_back(0);
+            int64_t d = ss::day_of(window_start + sc.bmin[b]) - first_day;
+            sc.sday.push_back(d >= 0 && d < int64_t(days) ? int32_t(d) : -1);
         }
         size_t s = sc.sstart.size() - 1;
         sc.bsess[b] = uint32_t(s);
@@ -95,8 +94,8 @@ inline void reduce(const BinEvent* events, size_t event_count,
     size_t nsess = sc.sstart.size();
 
     for (size_t i = 0; i < nsess; ++i) {
-        int64_t d = ss::day_of(window_start + sc.sstart[i]) - first_day;
-        if (d < 0 || d >= int64_t(days)) continue;
+        int32_t d = sc.sday[i];
+        if (d < 0) continue;
         auto& da = sc.day[size_t(d)];
         if (!da.touched) { da.touched = true; da.begin = uint32_t(i); sc.day_touched.push_back(uint32_t(d)); }
         da.end = uint32_t(i + 1);
@@ -122,10 +121,12 @@ inline void reduce(const BinEvent* events, size_t event_count,
         if (!sc.cat_key[at]) { sc.cat_key[at] = key; sc.cat_val[at] = 0; sc.cat_used.push_back(uint32_t(at)); }
         return sc.cat_val[at];
     };
-    for (uint32_t i : sc.buy_ev) {
-        uint32_t b = uint32_t(events[i].time / ss::GAP); // in range: only such events were recorded
-        int64_t d = ss::day_of(window_start + sc.sstart[sc.bsess[b]]) - first_day;
-        if (d < 0 || d >= int64_t(days)) continue;
+    for (size_t i = 0; i < event_count; ++i) {
+        if (!events[i].purchase) continue;
+        uint32_t b = uint32_t(events[i].time / ss::GAP);
+        if (b >= bin_count) continue;
+        int32_t d = sc.sday[sc.bsess[b]];
+        if (d < 0) continue;
         const Purchase& p = purchases[events[i].purchase - 1];
         auto& da = sc.day[size_t(d)];
         if (!da.has_cat) { da.has_cat = true; da.best_rev = -1; }
@@ -178,8 +179,8 @@ inline void reduce(const BinEvent* events, size_t event_count,
         const Click* best = nullptr;
         for (size_t i = 0; i < nsess; ++i) {
             if (sc.by_l[i] && (!best || better(sc.by_l[i], best))) best = sc.by_l[i];
-            int64_t d = ss::day_of(window_start + sc.sstart[i]) - first_day;
-            if (d < 0 || d >= int64_t(days)) continue;
+            int32_t d = sc.sday[i];
+            if (d < 0) continue;
             uint32_t camp = best && sc.sstart[i] - best->time <= ss::WEEK ? best->campaign : 0;
             if (camp < campaigns) {
                 auto& st = stats[camp * days + size_t(d)];
@@ -204,7 +205,6 @@ inline void reduce(const BinEvent* events, size_t event_count,
     sc.day_touched.clear();
     for (uint32_t at : sc.cat_used) sc.cat_key[at] = 0;
     sc.cat_used.clear();
-    sc.buy_ev.clear();
     for (uint32_t l : sc.by_l_touched) sc.by_l[l] = nullptr;
     sc.by_l_touched.clear();
     for (auto& t : sc.cov_touched) sc.campaign_slot[t.first]=SIZE_MAX;

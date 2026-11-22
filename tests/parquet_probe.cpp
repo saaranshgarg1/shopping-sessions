@@ -73,6 +73,20 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Required INT64 large enough to force page splitting at the 4 MiB flush,
+  // with exact int64 extremes and negatives.
+  {
+    pq::Column id;
+    id.name = "id";
+    id.kind = pq::Column::INT64;
+    constexpr int64_t kCount = 600000;
+    id.integers.resize(kCount);
+    for (int64_t i = 0; i < kCount; ++i)
+      id.integers[i] = i == 0 ? INT64_MIN : i == 1 ? INT64_MAX : i == 2 ? -1 : i - 300000;
+    pq::write(dir + "/big_int64.parquet", {id});
+    std::puts("ok big_int64.parquet");
+  }
+
   // Cross the page threshold in required and optional columns.
   {
     pq::Column value{"value", pq::Column::STRING, {}, {}, {}, {}};
