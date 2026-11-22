@@ -182,7 +182,10 @@ template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const s
     sprint::DateCache cache;
     IngestCache ingest_cache;
     if (source.kind==EVENTS) {
-        source.events.reserve((source.chunk.end-source.chunk.begin)/100);
+        size_t estimate=size_t(source.chunk.end-source.chunk.begin)/80;
+        source.events.reserve(estimate);
+        source.purchases.reserve(estimate/24+8);
+        for (auto& bucket:source.descriptors) bucket.reserve(estimate/PARTS+8);
         scanner.template run<7>([&](bool parsed,const std::array<SV,7>& f) {
             ++source.rows;
             if (!parsed || f[0].empty()) return;
@@ -203,8 +206,8 @@ template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const s
                     row.purchase=uint32_t(source.purchases.size());
                 }
             }
-            uint64_t h=hash(f[0]);
-            source.descriptors[h&(PARTS-1)].push_back({h,{index,uint32_t(source.events.size())}});
+            uint64_t key=event_key(f[0]);
+            source.descriptors[(mix(key)>>57)&(PARTS-1)].push_back({key,{index,uint32_t(source.events.size())}});
             source.events.push_back(row);
         });
     } else if (source.kind==CLICKS) {
@@ -245,26 +248,28 @@ inline SelectionStats select(std::vector<Source>& sources,size_t shard) {
     if (!count) return stats;
     if (count>=UINT32_MAX) throw std::runtime_error("event shard exceeds 32-bit row count");
     size_t capacity=16; while (capacity<count+count/2) capacity*=2;
-    std::vector<uint32_t> table(capacity);
+    struct Slot { uint64_t key=0; uint32_t winner=0; };
+    std::vector<Slot> table(capacity);
     for (size_t i=0;i<count;++i) {
-        const auto& d=descriptors[i]; auto& source=sources[d.ref.source]; auto& row=source.events[d.ref.row];
+        const auto& d=descriptors[i];
         size_t at=mix(d.hash)&(capacity-1);
-        while (table[at]) {
-            const auto& old_d=descriptors[table[at]-1];
-            auto& old_source=sources[old_d.ref.source]; auto& old=old_source.events[old_d.ref.row];
-            if (d.hash==old_d.hash) {
+        while (table[at].winner) {
+            if (d.hash==table[at].key) {
+                const auto& old_d=descriptors[table[at].winner-1];
+                auto& source=sources[d.ref.source]; auto& row=source.events[d.ref.row];
+                auto& old_source=sources[old_d.ref.source]; auto& old=old_source.events[old_d.ref.row];
                 ++stats.comparisons;
-                if (event_id(source,row)==event_id(old_source,old)) {
+                if (!(d.hash>>63) || event_id(source,row)==event_id(old_source,old)) {
                     ++stats.duplicates;
                     if (std::memcmp(source.chunk.begin+row.ingest_offset,old_source.chunk.begin+old.ingest_offset,20)<0) {
-                        old.time=UINT32_MAX; table[at]=uint32_t(i+1);
+                        old.time=UINT32_MAX; table[at].winner=uint32_t(i+1);
                     } else row.time=UINT32_MAX;
                     break;
                 }
             }
             at=(at+1)&(capacity-1);
         }
-        if (!table[at]) table[at]=uint32_t(i+1);
+        if (!table[at].winner) table[at]={d.hash,uint32_t(i+1)};
     }
     return stats;
 }
@@ -324,7 +329,13 @@ struct People {
         });
         pool.run(PARTS,[&](size_t p,size_t) {
             auto& shard=shards[p];
-            size_t count=0; for (const auto& s:sources) count+=s.aliases[p].size();
+            size_t count=0,event_count=0,click_count=0;
+            for (const auto& source:sources) {
+                size_t n=source.aliases[p].size(); count+=n;
+                if (source.kind==EVENTS) event_count+=n;
+                else if (source.kind==CLICKS) click_count+=n;
+            }
+            shard.events.reserve(event_count); shard.clicks.reserve(click_count);
             shard.packed.reserve(std::min<size_t>(count/24+64,65536));
             for (auto& s:sources) {
                 auto& refs=s.aliases[p];
@@ -451,17 +462,27 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
         std::vector<Purchase>().swap(s.purchases);
         std::vector<EventRow>().swap(s.events); std::vector<LinkRow>().swap(s.links);
     });
+    for (const auto& owner:people.owners) if (owner.size()>size_t(UINT32_MAX>>7)+1)
+        throw std::runtime_error("owner partition exceeds packed route index");
     std::vector<Routes> routes(PARTS);
     pool.run(PARTS,[&](size_t p,size_t) {
         auto& shard=people.shards[p]; auto& route=routes[p];
-        for (auto event:shard.events) {
-            uint32_t user=people.parent[shard.base+event.user];
-            route.events[mix(user)&(PARTS-1)].push_back({people.dense[user],event.time,event.purchase});
+        std::array<size_t,PARTS> event_sizes{},click_sizes{};
+        for (auto& event:shard.events) {
+            uint32_t root=people.parent[shard.base+event.user];
+            size_t part=mix(root)&(PARTS-1); ++event_sizes[part];
+            event.user=uint32_t((uint64_t(people.dense[root])<<7)|part);
         }
-        for (auto click:shard.clicks) {
-            uint32_t user=people.parent[shard.base+click.user];
-            route.clicks[mix(user)&(PARTS-1)].push_back({people.dense[user],click.ref});
+        for (auto& click:shard.clicks) {
+            uint32_t root=people.parent[shard.base+click.user];
+            size_t part=mix(root)&(PARTS-1); ++click_sizes[part];
+            click.user=uint32_t((uint64_t(people.dense[root])<<7)|part);
         }
+        for (size_t part=0;part<PARTS;++part) {
+            route.events[part].reserve(event_sizes[part]); route.clicks[part].reserve(click_sizes[part]);
+        }
+        for (auto event:shard.events) route.events[event.user&(PARTS-1)].push_back({event.user>>7,event.time,event.purchase});
+        for (auto click:shard.clicks) route.clicks[click.user&(PARTS-1)].push_back({click.user>>7,click.ref});
         std::vector<RoutedEvent>().swap(shard.events); std::vector<RoutedClick>().swap(shard.clicks);
     });
     timing("person-route");

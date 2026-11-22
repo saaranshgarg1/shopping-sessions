@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
   // Definition-level padding, all-null pages, and nullable schema with no mask.
   for (int count = 0; count <= 17; ++count) {
     for (int mode = 0; mode < 3; ++mode) {
-      pq::Column cat{"top_category", pq::Column::STRING, {}, {}, {}};
+      pq::Column cat{"top_category", pq::Column::STRING, {}, {}, {}, {}};
       for (int i = 0; i < count; ++i) {
         cat.strings.push_back(i % 2 ? "" : "unicode_\xc3\xa9");
         if (mode) cat.valid.push_back(mode == 2 && i % 3 != 0);
@@ -75,14 +75,39 @@ int main(int argc, char** argv) {
 
   // Cross the page threshold in required and optional columns.
   {
-    pq::Column value{"value", pq::Column::STRING, {}, {}, {}};
-    pq::Column cat{"top_category", pq::Column::STRING, {}, {}, {}};
+    pq::Column value{"value", pq::Column::STRING, {}, {}, {}, {}};
+    pq::Column cat{"top_category", pq::Column::STRING, {}, {}, {}, {}};
     for (int i = 0; i < 5001; ++i) {
       value.strings.push_back(std::string(1000, 'x') + std::to_string(i));
       cat.strings.push_back(value.strings.back());
       cat.valid.push_back(i % 7 != 0);
     }
     pq::write(dir + "/multipage.parquet", {value, cat});
+  }
+
+  // View-backed required and nullable strings, including default empty/null views.
+  {
+    std::vector<std::string> backing{"u_" + std::string(40, 'a'), "unicode_\xc3\xa9", ""};
+    pq::Column user{"user_id", pq::Column::STRING, {}, {}, {}, {}};
+    pq::Column cat{"top_category", pq::Column::STRING, {}, {}, {}, {}};
+    user.string_views = {backing[0], backing[1], std::string_view{}};
+    cat.string_views = {backing[1], std::string_view{}, backing[2]};
+    cat.valid = {1, 0, 1};
+    pq::write(dir + "/views.parquet", {user, cat});
+    user.strings = {"conflict"};
+    bool threw = false;
+    try { pq::write(dir + "/bad_views.parquet", {user}); } catch (const std::exception&) { threw = true; }
+    assert(threw);
+    user.strings.clear(); user.kind = pq::Column::INT64;
+    threw = false;
+    try { pq::write(dir + "/bad_views.parquet", {user}); } catch (const std::exception&) { threw = true; }
+    assert(threw);
+    user.kind = pq::Column::STRING;
+    cat.valid = {1};
+    threw = false;
+    try { pq::write(dir + "/bad_views.parquet", {user, cat}); } catch (const std::exception&) { threw = true; }
+    assert(threw);
+    std::puts("ok view-backed columns and validation");
   }
 
   // error paths

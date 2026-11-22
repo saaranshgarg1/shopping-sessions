@@ -21,6 +21,40 @@ int main() {
         auto [value,added]=packed.add(key,it->second,[&](uint32_t previous) { return exact_names[previous]==id; });
         assert(value==it->second && added==inserted);
     }
+    std::deque<std::string> event_ids;
+    std::unordered_map<std::string,uint32_t> event_expected;
+    std::vector<SV> event_names;
+    v5::PackedIds event_keys;
+    auto check_event_key=[&](std::string id) {
+        event_ids.push_back(std::move(id));
+        const auto& exact=event_ids.back();
+        bool short_key=!exact.empty() && exact.front()=='e' && exact.size()<=9;
+        uint64_t wanted=0;
+        for (size_t i=1;i<exact.size();++i) {
+            unsigned char byte=exact[i];
+            if (!byte || byte>=128) short_key=false;
+            if (i<=8) wanted|=uint64_t(byte)<<(8*(i-1));
+        }
+        uint64_t key=v5::event_key(exact);
+        assert(bool(key>>63)==!short_key);
+        assert(key==(short_key ? wanted : hash(exact)|(uint64_t(1)<<63)));
+        auto [it,inserted]=event_expected.emplace(exact,uint32_t(event_expected.size()));
+        if (inserted) event_names.push_back(exact);
+        auto [value,added]=event_keys.add(key,it->second,[&](uint32_t previous) { return event_names[previous]==exact; });
+        assert(value==it->second && added==inserted);
+    };
+    for (SV id:{"e","e0","e00","e000","e00000000","e12345678","e123456789","E1","u1",""})
+        check_event_key(std::string(id));
+    check_event_key(std::string("e\0",2));
+    check_event_key(std::string("e\0x",3));
+    check_event_key(std::string("e\x80",2));
+    check_event_key(std::string("e\xff",2));
+    for (size_t i=0;i<10000;++i) {
+        std::string id=i%7 ? "e" : "E";
+        size_t length=i%3 ? random()%9 : random()%45;
+        for (size_t n=0;n<length;++n) id.push_back(char(i%3 ? 1+random()%127 : random()%256));
+        check_event_key(std::move(id));
+    }
     v5::PackedIds collided;
     std::array<SV,3> collision_names{"long-a","long-b","long-c"};
     for (uint32_t i=0;i<3;++i) {
@@ -78,12 +112,12 @@ int main() {
     assert(caught);
     pool.run(1,[&](size_t,size_t) { ++jobs; }); assert(jobs==11004);
 
-    // Force distinct byte IDs to share a full 64-bit hash.
+    // Force long IDs with a shared prefix into one tagged fingerprint bucket.
     std::vector<std::string> texts{
-        "same,u1,1790812800000,2026-10-01T00:00:02Z,view,p,ignored\n",
-        "same,u2,bad,2026-10-01T00:00:01Z,view,p,ignored\n",
-        "other,u3,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
-        "same,u4,1790812800000,2026-10-01T00:00:03Z,view,p,ignored\n"
+        "e-common-prefix-00000000000000000000000000000000,u1,1790812800000,2026-10-01T00:00:02Z,view,p,ignored\n",
+        "e-common-prefix-00000000000000000000000000000000,u2,bad,2026-10-01T00:00:01Z,view,p,ignored\n",
+        "e-common-prefix-00000000000000000000000000000001,u3,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
+        "e-common-prefix-00000000000000000000000000000000,u4,1790812800000,2026-10-01T00:00:03Z,view,p,ignored\n"
     };
     Catalog catalog; sprint::Lookup products(catalog.products,"p"),campaigns(catalog.campaign_ids,"c_");
     std::vector<v5::Source> sources;
@@ -92,12 +126,32 @@ int main() {
         v5::scan(s,uint32_t(i),products,campaigns,1790812800000,1790812800000+DAY,32);
         assert(s.events.size()==1);
         for (auto& shard:s.descriptors) shard.clear();
-        s.descriptors[0].push_back({42,{uint32_t(i),0}}); sources.push_back(std::move(s));
+        s.descriptors[0].push_back({(uint64_t(1)<<63)|42,{uint32_t(i),0}}); sources.push_back(std::move(s));
     }
     auto stats=v5::select(sources,0);
     assert(stats.duplicates==2 && stats.descriptors==4);
     assert(sources[0].events[0].time==UINT32_MAX && sources[1].events[0].time==UINT32_MAX);
     assert(sources[2].events[0].time==0 && sources[3].events[0].time==UINT32_MAX);
+    // Packed zero keys and leading-zero suffixes stay distinct through exact selection.
+    std::vector<std::string> short_texts{
+        "e,u1,1790812800000,2026-10-01T00:00:02Z,view,p,ignored\n",
+        "e0,u2,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
+        "e00,u3,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
+        "e,u4,bad,2026-10-01T00:00:01Z,view,p,ignored\n"
+    };
+    std::vector<v5::Source> short_sources;
+    for (uint32_t i=0;i<short_texts.size();++i) {
+        v5::Source s{}; s.kind=v5::EVENTS; s.chunk={short_texts[i].data(),short_texts[i].data()+short_texts[i].size()};
+        v5::scan(s,i,products,campaigns,1790812800000,1790812800000+DAY,32);
+        assert(s.events.size()==1);
+        uint64_t key=v5::event_key(v5::event_id(s,s.events[0]));
+        for (auto& shard:s.descriptors) shard.clear();
+        s.descriptors[0].push_back({key,{i,0}}); short_sources.push_back(std::move(s));
+    }
+    auto short_stats=v5::select(short_sources,0);
+    assert(short_stats.descriptors==4 && short_stats.duplicates==1);
+    assert(short_sources[0].events[0].time==UINT32_MAX && short_sources[3].events[0].time==UINT32_MAX);
+    assert(short_sources[1].events[0].time==0 && short_sources[2].events[0].time==0);
     // False repeat-bit hits stay distinct; an unflagged singleton also survives.
     std::vector<std::string> distinct{
         "x,u1,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",

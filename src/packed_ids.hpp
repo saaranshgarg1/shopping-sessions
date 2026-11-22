@@ -2,8 +2,8 @@
 
 namespace v5 {
 // Short keys encode their exact nonzero ASCII bytes; long/arbitrary bytes stay in exact fallback.
-inline uint64_t alias_key(SV id) {
-    if (id.size()<=9 && !id.empty() && id.front()=='u') {
+inline uint64_t opaque_key(SV id,char prefix) {
+    if (id.size()<=9 && !id.empty() && id.front()==prefix) {
         uint64_t packed=0;
         if (id.size()>1) std::memcpy(&packed,id.data()+1,id.size()-1);
         constexpr uint64_t high=0x8080808080808080ULL;
@@ -13,6 +13,8 @@ inline uint64_t alias_key(SV id) {
     }
     return hash(id)|(uint64_t(1)<<63);
 }
+inline uint64_t alias_key(SV id) { return opaque_key(id,'u'); }
+inline uint64_t event_key(SV id) { return opaque_key(id,'e'); }
 struct PackedIds {
     struct Slot { uint64_t key=0; uint32_t value=0; };
     std::vector<Slot> slots;

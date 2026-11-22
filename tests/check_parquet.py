@@ -46,6 +46,14 @@ assert t2.column("user_id").to_pylist() == ["u1", "u2"]
 assert t2.column("revenue_cents").to_pylist() == [0, 12345]
 print("required.parquet: values OK")
 
+views = pq.read_table(f"{d}/views.parquet")
+assert views.schema.names == ["user_id", "top_category"]
+assert not views.schema.field("user_id").nullable
+assert views.schema.field("top_category").nullable
+assert views.column("user_id").to_pylist() == ["u_" + "a" * 40, "unicode_é", ""]
+assert views.column("top_category").to_pylist() == ["unicode_é", None, ""]
+print("views.parquet: borrowed long/UTF-8/empty strings and nulls OK")
+
 for count in range(18):
     for mode in range(3):
         t = pq.read_table(f"{d}/null_{count}_{mode}.parquet")

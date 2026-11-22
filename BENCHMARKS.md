@@ -1,6 +1,18 @@
-# v11 dense-owner routing candidate
+# v12 compact selection and allocation candidate
 
 ## Current iteration
+
+Official user-reported winning v11 score: **2.1549s**. Target remains **below0.400s**.
+
+v12 combines three copy/lookup changes: lossless short event-ID keys and compact key/winner dedup slots (tagged arbitrary/long IDs compare full bytes); preallocated scan/shard records and exact-sized owner routes; borrowed user/category Parquet string-view columns rather than per-row owned string copies. Identity ownership and session semantics unchanged. Runtime remains silent.
+
+Gate: all36 fixtures, four differential datasets, event-key/randomized/collision tests, full unit suite, independent PyArrow view/null/empty/error tests, writer ASan/UBSan probe, silent offline dev container and complete20M typed oracle comparison passed. One laptop proxy run2.61s is not an official improvement claim. Await v12 scorer result.
+
+---
+
+# Winning v11 dense-owner routing candidate
+
+## Previous iteration
 
 Official user-reported scores: winning v9 **2.2446s**, v10 early-bin folding **2.2962s**. v10 regression rejected; v11 restores the v9 reducer and removes early folding. Target remains **below 0.400s**.
 

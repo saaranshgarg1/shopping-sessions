@@ -367,14 +367,14 @@ void write_users(const fs::path& path,const std::vector<UserRow>& rows) {
     std::vector<C> cols{{"user_id",C::STRING},{"day",C::DATE},{"sessions",C::INT64},
                         {"events",C::INT64},{"revenue_cents",C::INT64},{"top_category",C::STRING}};
     for (auto& c:cols) {
-        if (c.kind==C::STRING) c.strings.reserve(rows.size());
+        if (c.kind==C::STRING) c.string_views.reserve(rows.size());
         else c.integers.reserve(rows.size());
     }
     cols[5].valid.reserve(rows.size());
     for (const auto& r:rows) {
-        cols[0].strings.emplace_back(r.user); cols[1].integers.push_back(r.day);
+        cols[0].string_views.push_back(r.user); cols[1].integers.push_back(r.day);
         cols[2].integers.push_back(r.sessions); cols[3].integers.push_back(r.events); cols[4].integers.push_back(r.revenue);
-        cols[5].strings.emplace_back(r.category); cols[5].valid.push_back(r.has_category);
+        cols[5].string_views.push_back(r.category); cols[5].valid.push_back(r.has_category);
     }
     pq::write(path.string(),cols);
 }

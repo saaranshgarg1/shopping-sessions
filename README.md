@@ -1,6 +1,6 @@
-# Shopping Sessions v11 candidate — exact native pipeline
+# Shopping Sessions v12 — exact native pipeline
 
-C++20 candidate for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). **v11 verification pending.** No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
+C++20 candidate for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
 
 ## Submit
 
@@ -33,7 +33,9 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 
 - Restored v5 shard-owned identity and exact event-selection path after v6 scored slower (3.3s versus 2.9522s). No fused per-row identity lookup or CRC experiment in this release.
 - Alias descriptors carry exact packed short-ID keys or tagged fingerprints. Shard-local compact tables avoid rereading/re-hashing short names for every event. Arbitrary/long IDs always compare full bytes on fingerprint matches; no generator ID inversion.
-- Repeat filter removed after v8 regression. Exact event selection remains the winning v7 implementation.
+- Repeat filter removed after v8 regression. Event selection now uses lossless short-ID keys in compact key/winner slots; tagged long/arbitrary IDs retain full-byte comparison. Empty-suffix and leading-zero IDs stay distinct.
+- Input descriptor, purchase and identity-output buffers are preallocated; owner routing counts exact partition sizes before appending to avoid repeated reallocations.
+- User Parquet columns borrow live ID/category string views, removing per-row string allocations and copies before page serialization.
 - ISA-specialized whole-chunk scanner separates quote masks from comma/LF masks, removing per-vector indirect calls and transition overhead.
 - Successful production execution is silent. Diagnostic stage timing is compile-time opt-in (`-DSS_PROFILE=1`), absent from submitted image.
 - Persistent worker pool; LF-aligned mapped CSV chunks. Runtime AVX2/AVX-512F/BW dispatch, bounded loads at mapping ends, exact whole-field quote validation. CR and spaces remain data.

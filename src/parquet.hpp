@@ -18,6 +18,7 @@
 //                                           // (top_category remains optional),
 //                                           // else size must equal
 //                                           // the value count, 1 = present, 0 = null
+//       std::vector<std::string_view> string_views; // Alternative STRING input; bytes live through write().
 //     };
 //     void write(const std::string& path, const std::vector<Column>& columns);
 //   }
@@ -33,6 +34,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace pq {
@@ -44,6 +46,7 @@ struct Column {
   std::vector<std::string> strings;
   std::vector<int64_t> integers;
   std::vector<uint8_t> valid;
+  std::vector<std::string_view> string_views; // Alternative to strings; backing bytes must live through write().
 };
 
 namespace detail {
@@ -118,7 +121,7 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
   using namespace detail;
   if (cols.empty()) throw std::runtime_error("pq::write: no columns");
   auto rows_of = [](const Column& c) -> size_t {
-    return c.kind == Column::STRING ? c.strings.size() : c.integers.size();
+    return c.kind == Column::STRING ? (c.string_views.empty() ? c.strings.size() : c.string_views.size()) : c.integers.size();
   };
   auto is_optional = [](const Column& c) {
     // Preserve the declared nullable output schema even with no rows/null mask.
@@ -126,6 +129,8 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
   };
   const size_t n = rows_of(cols[0]);
   for (const Column& c : cols) {
+    if (!c.string_views.empty() && (!c.strings.empty() || c.kind != Column::STRING))
+      throw std::runtime_error("pq::write: column '" + c.name + "' has conflicting string inputs");
     if (c.name.empty())
       throw std::runtime_error("pq::write: empty column name");
     if (rows_of(c) != n)
@@ -209,9 +214,10 @@ inline void write(const std::string& path, const std::vector<Column>& cols) {
       if (present) {
         switch (c.kind) {
         case Column::STRING: {
-          const std::string& s = c.strings[i];
+          const std::string_view s = c.string_views.empty() ? std::string_view(c.strings[i]) : c.string_views[i];
+          if (s.size() > UINT32_MAX) throw std::runtime_error("pq::write: string exceeds uint32 length");
           put_u32(vals, uint32_t(s.size()));
-          vals.insert(vals.end(), s.begin(), s.end());
+          if (!s.empty()) vals.insert(vals.end(), s.begin(), s.end());
           break;
         }
         case Column::INT64: {
