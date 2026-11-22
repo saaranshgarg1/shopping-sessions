@@ -263,6 +263,24 @@ int main() {
         std::shuffle(ev.begin(), ev.end(), rng);
         std::shuffle(clicks.begin(), clicks.end(), rng);
         run_case(ev, pur, clicks, window_start, categories, campaigns, first_day, days, sc, daily, stats);
+        auto wanted_daily=daily; auto wanted_stats=stats;
+        std::vector<BinEvent> sparse;
+        std::map<uint32_t,v5::BinSummary> folded;
+        for (const auto& event:ev) {
+            if (event.purchase) sparse.push_back(event);
+            else {
+                uint32_t bin=uint32_t(event.time/GAP);
+                auto [it,added]=folded.emplace(bin,v5::BinSummary{event.time,event.time,1,0});
+                if (!added) { it->second.first=std::min(it->second.first,event.time); it->second.last=std::max(it->second.last,event.time); ++it->second.count; }
+            }
+        }
+        std::vector<v5::BinSummary> summaries;
+        for (const auto& [bin,summary]:folded) summaries.push_back(summary);
+        std::shuffle(summaries.begin(),summaries.end(),rng);
+        daily.clear(); stats.assign(campaigns*days,{});
+        reduce(sparse.data(),sparse.size(),pur,clicks.data(),clicks.size(),window_start,size_t(14*DAY/GAP+2),categories,
+               campaigns,first_day,days,daily,stats,sc,summaries.data(),summaries.size());
+        compare(daily,wanted_daily,stats,wanted_stats,"folded differential");
     }
     assert(over64 >= 100 && whales >= 90);
 

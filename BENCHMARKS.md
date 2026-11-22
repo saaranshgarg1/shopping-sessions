@@ -1,6 +1,18 @@
-# v9 compact identity ownership candidate
+# v10 early whale-bin folding candidate
 
 ## Current iteration
+
+Official user-reported winning v9 score: **2.2446s** (18% faster than v7). Target remains **below0.400s**.
+
+v10 keeps v9 exact compact identity and folds non-purchase events for canonical people with >=8,192 surviving events into per-producer half-hour min/max/count summaries before person routing/grouping. Purchases remain exact sparse rows; reducer merges summary endpoints/counts with purchase bins before session/day/attribution. Counts include all aliases in linked/shared-device components and only valid dedup winners. No approximation or cached output; runtime silent.
+
+Gate: all 36 fixtures, four differential datasets, 1,100 folded-versus-raw randomized histories, complete 20M proxy exact table comparison and silent offline dev container passed. One laptop 20M run took3.27s, not an official performance result. Await v10 scorer score.
+
+---
+
+# Winning v9 compact identity ownership candidate
+
+## Previous iteration
 
 Official user-reported scores: v7 **2.7389s**, v8 **2.8354s**. Rejected repeat filter and restored v7 event selection. Target remains **below 0.400s**.
 

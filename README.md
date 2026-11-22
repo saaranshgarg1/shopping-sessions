@@ -1,4 +1,4 @@
-# Shopping Sessions v9 — exact native pipeline
+# Shopping Sessions v10 — exact native pipeline
 
 Submission-ready C++20 executable for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
 
@@ -40,6 +40,7 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 - Checked F1/F2/F3 timestamps and purchase amounts. Valid ingest F1 copies compare chronologically by bytes. Calendar caching and date-based lateness shortcut preserve 24-hour boundaries.
 - Producer-local 28-byte event rows plus 16-byte hash/chunk/row descriptors. One worker owns each exact event-ID shard. Full length/bytes resolve hash collisions; an invalid earliest copy suppresses later valid copies across users.
 - Exact shard-owned alias dictionaries, union-find, and bytewise minimum person names including link-only IDs. Compact surviving rows route to canonical person owners; purchases use sparse payloads.
+- Canonical people with at least 8,192 surviving events fold non-purchases into producer-local half-hour min/max/count summaries before route/group copies. Purchases stay sparse exact rows; summary-only people remain visible.
 - Half-hour event bins keep actual min/max/count/revenue. Occupied bins merge only when endpoint gap is at most 30 minutes; no per-event sort. Daily category totals use session-start date.
 - Unsorted click intervals over session indices. Latest timestamp then bytewise smallest click ID wins credit; campaign bitsets count assists once. Identical click copies are idempotent, eliminating global click dedup and sorting.
 - Per-worker campaign counters and independent person-owned Parquet files. DATE, real null definition levels, UTF-8 and int64 revenue. Checked footer close before exit, including empty tables.
