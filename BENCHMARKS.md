@@ -1,6 +1,18 @@
-# v12 compact selection and allocation candidate
+# v13 timestamp and private-cache selection candidate
 
 ## Current iteration
+
+User reports v12 improved over v11 **2.1549s**; exact v12 score not supplied yet. Target remains **below0.400s**.
+
+v13 keeps v12 and changes two hot paths: common13-digit F3 timestamps use bounded8+4+1-byte loads and checked SWAR decimal arithmetic; large event-selection shards split into16 exact subpartitions to keep key/winner tables in private cache. Every candidate still enters exact dedup, including invalid earliest records and tagged full-byte collisions. Successful runtime silent.
+
+Gate: native tests including100kF3 cases, all256bytes at13positions, long zero padding, protected mapping tails and40001-record selection path passed; all36fixtures, four differential datasets, silent offline dev container and complete20M typed oracle comparison passed. Laptop proxy2.53s is not an official performance claim. Await v13 scorer result.
+
+---
+
+# Improved v12 compact selection and allocation candidate
+
+## Previous iteration
 
 Official user-reported winning v11 score: **2.1549s**. Target remains **below0.400s**.
 

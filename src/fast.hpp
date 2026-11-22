@@ -166,6 +166,22 @@ struct DateCache {
     struct Date { uint64_t head=0; uint16_t tail=0; int64_t midnight=0; };
     std::array<Date,256> dates{};
     bool parse(SV s,int64_t& out) {
+        if (s.size()==13) {
+            uint64_t head; uint32_t tail;
+            std::memcpy(&head,s.data(),8); std::memcpy(&tail,s.data()+8,4);
+            constexpr uint64_t high=0x8080808080808080ULL;
+            if (((head+0x4646464646464646ULL)|(head-0x3030303030303030ULL))&high ||
+                ((tail+0x46464646U)|(tail-0x30303030U))&0x80808080U || unsigned(s[12]-'0')>9) return false;
+            head-=0x3030303030303030ULL;
+            head=(head*10+(head>>8))&0x00ff00ff00ff00ffULL;
+            head=(head*100+(head>>16))&0x0000ffff0000ffffULL;
+            head=(head*10000+(head>>32))&0xffffffffULL;
+            tail-=0x30303030U;
+            tail=(tail*10+(tail>>8))&0x00ff00ffU;
+            tail=(tail*100+(tail>>16))&0xffffU;
+            out=int64_t(head*100000+tail*10+unsigned(s[12]-'0'));
+            return true;
+        }
         if ((s.size()!=20 && s.size()!=25) || s[4]!='-') return timestamp(s,out);
         int64_t offset=0;
         if (s.size()==20) { if (s[19]!='Z') return false; }

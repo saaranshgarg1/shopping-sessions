@@ -169,6 +169,23 @@ int main() {
     auto filtered=v5::select(false_hits,0);
     assert(filtered.descriptors==3 && filtered.duplicates==0);
     for (const auto& s:false_hits) assert(s.events[0].time==0);
+    // Force the cache-sized subpartition path; earliest invalid still wins across buckets.
+    std::string large_input;
+    for (size_t i=0;i<40000;++i)
+        large_input+="e"+std::to_string(i)+",u,1790812800000,2026-10-01T00:00:02Z,view,p,x\n";
+    large_input+="e123,other,bad,2026-10-01T00:00:01Z,view,p,x\n";
+    std::vector<v5::Source> large(1);
+    large[0].kind=v5::EVENTS; large[0].chunk={large_input.data(),large_input.data()+large_input.size()};
+    v5::scan(large[0],0,products,campaigns,1790812800000,1790812800000+DAY,32);
+    assert(large[0].events.size()==40001);
+    for (auto& shard:large[0].descriptors) shard.clear();
+    for (uint32_t i=0;i<large[0].events.size();++i)
+        large[0].descriptors[0].push_back({v5::event_key(v5::event_id(large[0],large[0].events[i])),{0,i}});
+    auto large_stats=v5::select(large,0);
+    assert(large_stats.descriptors==40001 && large_stats.duplicates==1);
+    assert(large[0].events[123].time==UINT32_MAX && large[0].events.back().time==UINT32_MAX);
+    size_t valid_large=0; for (const auto& event:large[0].events) valid_large+=event.time!=UINT32_MAX;
+    assert(valid_large==39999);
     std::string links="u3,uZ\nuZ,A-link-only\nuZ,u3\nA-link-only,A-link-only\nempty,\nuClick,uClickAlias\nuClickAlias,B-click-only\n";
     v5::Source link_source{}; link_source.kind=v5::LINKS; link_source.chunk={links.data(),links.data()+links.size()};
     v5::scan(link_source,4,products,campaigns,1790812800000,1790812800000+DAY,32);
