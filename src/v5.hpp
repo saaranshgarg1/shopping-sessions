@@ -231,17 +231,30 @@ inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,co
 }
 struct SelectionStats { uint64_t descriptors=0,comparisons=0,duplicates=0; size_t largest=0; };
 inline SelectionStats select(std::vector<Source>& sources,size_t shard) {
-    std::vector<Descriptor> descriptors;
     size_t count=0; for (const auto& s:sources) count+=s.descriptors[shard].size();
-    descriptors.reserve(count);
-    for (auto& s:sources) {
-        auto& block=s.descriptors[shard];
-        descriptors.insert(descriptors.end(),block.begin(),block.end());
-        std::vector<Descriptor>().swap(block);
-    }
     SelectionStats stats{count,0,0,count};
     if (!count) return stats;
     if (count>=UINT32_MAX) throw std::runtime_error("event shard exceeds 32-bit row count");
+    size_t bits=16; while (bits<count*8) bits*=2;
+    std::vector<uint64_t> seen(bits/64+1),repeat(seen.size());
+    // Complete repeat detection first; every member of a repeated bucket takes exact dedup.
+    for (const auto& s:sources) for (const auto& d:s.descriptors[shard]) {
+        size_t bucket=(d.hash>>7)&(bits-1);
+        uint64_t bit=uint64_t(1)<<(bucket&63);
+        repeat[bucket>>6]|=seen[bucket>>6]&bit;
+        seen[bucket>>6]|=bit;
+    }
+    std::vector<Descriptor> descriptors;
+    descriptors.reserve(count/4);
+    for (auto& s:sources) {
+        auto& block=s.descriptors[shard];
+        for (const auto& d:block) {
+            size_t bucket=(d.hash>>7)&(bits-1);
+            if (repeat[bucket>>6]&(uint64_t(1)<<(bucket&63))) descriptors.push_back(d);
+        }
+        std::vector<Descriptor>().swap(block);
+    }
+    count=descriptors.size();
     size_t capacity=16; while (capacity<count+count/2) capacity*=2;
     std::vector<uint32_t> table(capacity);
     for (size_t i=0;i<count;++i) {

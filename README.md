@@ -1,4 +1,4 @@
-# Shopping Sessions v7 — exact native pipeline
+# Shopping Sessions v8 — exact native pipeline
 
 Submission-ready C++20 executable for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
 
@@ -32,6 +32,7 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 ## Engine
 
 - Restored v5 shard-owned identity and exact event-selection path after v6 scored slower (3.3s versus 2.9522s). No fused per-row identity lookup or CRC experiment in this release.
+- Completed repeat-bit filter bypasses exact-table insertion only for singleton buckets. Every member of a repeated bucket undergoes full-byte dedup; hash collisions never remove distinct IDs.
 - ISA-specialized whole-chunk scanner separates quote masks from comma/LF masks, removing per-vector indirect calls and transition overhead.
 - Successful production execution is silent. Diagnostic stage timing is compile-time opt-in (`-DSS_PROFILE=1`), absent from submitted image.
 - Persistent worker pool; LF-aligned mapped CSV chunks. Runtime AVX2/AVX-512F/BW dispatch, bounded loads at mapping ends, exact whole-field quote validation. CR and spaces remain data.
@@ -49,6 +50,6 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 
 See [BENCHMARKS.md](BENCHMARKS.md). All 36 official fixtures and both matching fresh v5 public dev tables passed. Complete 20M-event/5M-click proxy tables matched the reference, including DATE, unique keys and reconciled totals. Parser/reducer randomized checks and AddressSanitizer/UndefinedBehaviorSanitizer passed.
 
-Target remains a correct official hidden-practice median **below 0.300s**. Laptop dev runs below 300ms do not satisfy that target. Submit, read the official result, then iterate on measured bottlenecks. Local median for 20M practice proxy was 3.79s, not below target.
+Current target is a correct official hidden-practice median **below 0.400s**, relaxed from 0.300s. Small dev runs do not satisfy that target. Submit, read the official result, then iterate on measured bottlenecks. Local median for 20M practice proxy was 3.79s, not below target.
 
 `tests/prepare.py` downloads matching v5 artifacts into isolated directories and builds the generator with Rust 1.85+. `tests/bench.py` alternates fresh candidate/reference processes, hashes inputs/binaries/artifacts, records wall time/faults, and exact-compares typed tables. Native affinity is not CPU quota or no-swap enforcement; advisory eviction is not proof of cold cache. `tests/calibrate.cpp` exposes empty launch, structural scan, and output replay probes.

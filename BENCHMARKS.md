@@ -1,6 +1,16 @@
-# v7 scanner-only candidate
+# v8 exact-repeat-filter candidate
 
 ## Current iteration
+
+Target relaxed to **below0.400s**. User-reported winning v7 score: **2.7389s**, 7.2% faster than v5 2.9522s. v8 keeps v7 scanner/identity/reducer and changes only event selection: a completed seen/repeat bitmap pass routes every member of a repeated bucket through exact dedup and skips table work for unflagged singleton buckets. Invalid earliest records remain in selection; full IDs resolve false repeats and hash collisions.
+
+Quick gate: collision/singleton tests, 36 official fixtures and four differential datasets passed. Release container builds; official performance pending. This is not a claimed0.400s solution.
+
+---
+
+# Winning v7 scanner-only candidate
+
+## Previous iteration
 
 User-reported official scores: v5 **2.9522s**, v6 fused identity **3.3s**. Rejected v6 regression. v7 restores v5 identity, hash and exact event-selection pipeline while retaining silent runtime, Cascade Lake scheduling and ISA-specialized scanner loops. Scanner is the only execution-stage change relative to v5; no new fused lookup or repeat prefilter.
 

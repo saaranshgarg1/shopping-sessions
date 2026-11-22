@@ -75,6 +75,23 @@ int main() {
     assert(stats.duplicates==2 && stats.descriptors==4);
     assert(sources[0].events[0].time==UINT32_MAX && sources[1].events[0].time==UINT32_MAX);
     assert(sources[2].events[0].time==0 && sources[3].events[0].time==UINT32_MAX);
+    // False repeat-bit hits stay distinct; an unflagged singleton also survives.
+    std::vector<std::string> distinct{
+        "x,u1,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
+        "y,u2,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
+        "z,u3,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n"
+    };
+    std::vector<v5::Source> false_hits;
+    for (uint32_t i=0;i<distinct.size();++i) {
+        v5::Source s{}; s.kind=v5::EVENTS; s.chunk={distinct[i].data(),distinct[i].data()+distinct[i].size()};
+        v5::scan(s,i,products,campaigns,1790812800000,1790812800000+DAY,32);
+        for (auto& shard:s.descriptors) shard.clear();
+        uint64_t h=i==0 ? 42 : i==1 ? 42+32*128 : 42+2*128;
+        s.descriptors[0].push_back({h,{i,0}}); false_hits.push_back(std::move(s));
+    }
+    auto filtered=v5::select(false_hits,0);
+    assert(filtered.descriptors==3 && filtered.duplicates==0);
+    for (const auto& s:false_hits) assert(s.events[0].time==0);
     std::string links="u3,uZ\nuZ,A-link-only\nuZ,u3\nA-link-only,A-link-only\nempty,\n";
     v5::Source link_source{}; link_source.kind=v5::LINKS; link_source.chunk={links.data(),links.data()+links.size()};
     v5::scan(link_source,4,products,campaigns,1790812800000,1790812800000+DAY,32);
