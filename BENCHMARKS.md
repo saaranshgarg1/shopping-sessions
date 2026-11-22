@@ -1,4 +1,16 @@
-# v5 verification and measured performance
+# v6 candidate and prior v5 measurements
+
+## Current iteration
+
+Official user-reported v5 score: **2.9522s**. It misses 0.300s by 9.84x. v6 is a different candidate for scorer A/B, not a demonstrated target result.
+
+v6 fuses linked identity resolution into input decoding, replaces the all-row alias ownership pass with worker-private singleton merging, uses CRC32 fingerprints plus exact byte equality, applies a completed repeat-bitmap prefilter before exact event selection, and specializes whole-chunk SIMD loops. Successful release runs emit no stdout/stderr; profile timing requires a separate `-DSS_PROFILE=1` build. Release instruction scheduling is tuned for Cascade Lake without globally requiring AVX-512.
+
+Quick gate: all 36 fixtures, both matching v5 dev tables, four boundary-heavy differential datasets, exact ID/prefilter tests, scanner tests and full existing unit suite pass. Offline read-only release container matches public dev output and is silent. Independent focused review found no confirmed defects. One laptop 20M proxy run took 4.64s; this is not evidence of an improvement over v5. Scorer measurement is required before selecting this variant.
+
+---
+
+# Prior v5 verification and measured performance
 
 Measured 2026-11-22. Official practice target below 0.300s is **not achieved or claimed**. This release replaces the former default execution path; preserves its reference as a fallback/oracle. Historical benchmark claims were removed to avoid confusing pre-v5 short-ID inputs with current v5 inputs.
 

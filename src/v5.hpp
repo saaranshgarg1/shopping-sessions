@@ -394,12 +394,16 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
     // shortcut: signed relative milliseconds cover 14 days plus lookback; wider windows use oracle.
     size_t width=vector_width();
     if (!width || end-start>INT32_MAX) return false;
+#if SS_PROFILE
     auto clock=std::chrono::steady_clock::now(),last=clock;
     auto timing=[&](const char* name) {
         auto now=std::chrono::steady_clock::now();
         std::cerr<<"v5 "<<name<<" "<<std::chrono::duration<double>(now-last).count()<<"s cumulative "
                  <<std::chrono::duration<double>(now-clock).count()<<"s\n"; last=now;
     };
+#else
+    auto timing=[](const char*) {};
+#endif
     Pool pool(threads);
     Mapping product_map(data/"products.csv"),campaign_map(data/"campaigns.csv");
     Catalog catalog; catalog.products_from(product_map); catalog.campaigns_from(campaign_map);
@@ -449,6 +453,7 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
     if (fs::is_empty(output/"user_daily")) write_users(output/"user_daily"/"part-0.parquet",{});
     write_campaigns(output/"campaign_daily"/"part-0.parquet",stats,catalog,first_day,days);
     timing("bins/coverage/parquet-close");
+#if SS_PROFILE
     SelectionStats sum;
     for (auto s:selection) { sum.descriptors+=s.descriptors; sum.comparisons+=s.comparisons; sum.duplicates+=s.duplicates; sum.largest=std::max(sum.largest,s.largest); }
     uint64_t bytes=0,rows=0;
@@ -458,6 +463,7 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
              <<" descriptor_bytes="<<sum.descriptors*sizeof(Descriptor)<<" exact_comparisons="<<sum.comparisons
              <<" duplicates="<<sum.duplicates<<" largest_shard="<<sum.largest<<" aliases="<<people.names.size()
              <<" purchases="<<purchase_count<<" simd="<<width*8<<"\n";
+#endif
     return true;
 }
 } // namespace v5

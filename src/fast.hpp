@@ -425,9 +425,13 @@ Result aggregate(Partition<Event>& ep,Partition<Click>& cp,const Catalog& catalo
 
 inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64_t start,int64_t end,
                 int64_t first_day,size_t days) {
+#if SS_PROFILE
     auto clock=std::chrono::steady_clock::now(),last=clock;
     auto timing=[&](const char* stage) { auto now=std::chrono::steady_clock::now();
         std::cerr<<"sprint "<<stage<<" "<<std::chrono::duration<double>(now-last).count()<<"s\n"; last=now; };
+#else
+    auto timing=[](const char*) {};
+#endif
     try {
         auto link_maps=map_files(files(data/"links"));
         Keys user_ids('u'),event_ids('e'),click_ids('k');
@@ -472,10 +476,10 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
         if (fs::is_empty(output/"user_daily")) write_users(output/"user_daily"/"part-0.parquet",{});
         write_campaigns(output/"campaign_daily"/"part-0.parquet",campaign_stats,catalog,first_day,days);
         timing("person blocks/session/attribution/write");
-        std::cerr<<"sprint total "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-clock).count()<<"s\n";
+        SS_LOG(std::cerr<<"sprint total "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-clock).count()<<"s\n");
         return true;
     } catch (const Unsupported&) {
-        std::cerr<<"sprint unsupported shape; restarting baseline\n";
+        SS_LOG(std::cerr<<"sprint unsupported shape; restarting baseline\n");
         return false;
     }
 }

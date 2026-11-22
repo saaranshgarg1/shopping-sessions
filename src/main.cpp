@@ -1,5 +1,6 @@
 #include <vector>
 #include "core.hpp"
+#include "timing.hpp"
 #include "parquet.hpp"
 #include <atomic>
 #include <chrono>
@@ -391,6 +392,7 @@ void write_campaigns(const fs::path& path,const std::vector<Stats>& stats,const 
 }
 #include "fast.hpp"
 #include "v5.hpp"
+#include "fused.hpp"
 int main(int argc,char** argv) {
     try {
         if (argc!=1 && argc!=3) throw std::runtime_error("usage: shopping-sessions [DATA_DIR OUTPUT_DIR]");
@@ -400,9 +402,13 @@ int main(int argc,char** argv) {
         cpu_set_t allowed; CPU_ZERO(&allowed);
         size_t available=sched_getaffinity(0,sizeof(allowed),&allowed)==0 ? size_t(CPU_COUNT(&allowed)) : ncpu;
         size_t threads=std::min<size_t>(ncpu,available);
+#if SS_PROFILE
         auto clock=std::chrono::steady_clock::now(),last=clock;
         auto timing=[&](const char* stage) { auto now=std::chrono::steady_clock::now();
             std::cerr<<stage<<" "<<std::chrono::duration<double>(now-last).count()<<"s\n"; last=now; };
+#else
+        auto timing=[](const char*) {};
+#endif
         int64_t start=manifest_value(data/"manifest.json","window_start"),end=manifest_value(data/"manifest.json","window_end");
         if (end<=start) throw std::runtime_error("empty or reversed manifest window");
         int64_t first_day=day_of(start); size_t days=day_of(end-1)-first_day+1;
@@ -416,7 +422,9 @@ int main(int argc,char** argv) {
         if (setting("SS_BASELINE","0")!="1") {
             if (setting("SS_LEGACY","0")=="1") {
                 if (sprint::run(data,output,threads,start,end,first_day,days)) return 0;
-            } else if (v5::run(data,output,threads,start,end,first_day,days)) return 0;
+            } else if (setting("SS_V5","0")=="1") {
+                if (v5::run(data,output,threads,start,end,first_day,days)) return 0;
+            } else if (v6::run(data,output,threads,start,end,first_day,days)) return 0;
         }
         auto link_maps=map_files(files(data/"links"));
         Identity identity;
@@ -451,7 +459,7 @@ int main(int argc,char** argv) {
         if (fs::is_empty(output/"user_daily")) write_users(output/"user_daily"/"part-0.parquet",{});
         write_campaigns(output/"campaign_daily"/"part-0.parquet",campaign_stats,catalog,first_day,days);
         timing("sort/session/attribution/write");
-        std::cerr<<"total "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-clock).count()<<"s\n";
+        SS_LOG(std::cerr<<"total "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-clock).count()<<"s\n");
         return 0;
     } catch (const std::exception& error) { std::cerr<<"shopping-sessions: "<<error.what()<<'\n'; return 1; }
 }
