@@ -1,6 +1,16 @@
-# v6 candidate and prior v5 measurements
+# v7 scanner-only candidate
 
 ## Current iteration
+
+User-reported official scores: v5 **2.9522s**, v6 fused identity **3.3s**. Rejected v6 regression. v7 restores v5 identity, hash and exact event-selection pipeline while retaining silent runtime, Cascade Lake scheduling and ISA-specialized scanner loops. Scanner is the only execution-stage change relative to v5; no new fused lookup or repeat prefilter.
+
+Quick gate passed all36 official fixtures, four boundary-heavy differential datasets and scanner/identity tests. Release image builds. Await official v7 score; no improvement or target claim yet.
+
+---
+
+# Rejected v6 candidate
+
+## Prior iteration
 
 Official user-reported v5 score: **2.9522s**. It misses 0.300s by 9.84x. v6 is a different candidate for scorer A/B, not a demonstrated target result.
 

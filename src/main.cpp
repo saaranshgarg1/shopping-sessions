@@ -392,7 +392,6 @@ void write_campaigns(const fs::path& path,const std::vector<Stats>& stats,const 
 }
 #include "fast.hpp"
 #include "v5.hpp"
-#include "fused.hpp"
 int main(int argc,char** argv) {
     try {
         if (argc!=1 && argc!=3) throw std::runtime_error("usage: shopping-sessions [DATA_DIR OUTPUT_DIR]");
@@ -422,9 +421,7 @@ int main(int argc,char** argv) {
         if (setting("SS_BASELINE","0")!="1") {
             if (setting("SS_LEGACY","0")=="1") {
                 if (sprint::run(data,output,threads,start,end,first_day,days)) return 0;
-            } else if (setting("SS_V5","0")=="1") {
-                if (v5::run(data,output,threads,start,end,first_day,days)) return 0;
-            } else if (v6::run(data,output,threads,start,end,first_day,days)) return 0;
+            } else if (v5::run(data,output,threads,start,end,first_day,days)) return 0;
         }
         auto link_maps=map_files(files(data/"links"));
         Identity identity;

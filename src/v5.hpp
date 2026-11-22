@@ -1,5 +1,6 @@
 #pragma once
 #include "reduce.hpp"
+#include "scanner.hpp"
 #include <bit>
 #include <condition_variable>
 #include <functional>
@@ -173,17 +174,16 @@ struct IngestCache {
         return tod>time-event_day*DAY;
     }
 };
-inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,const sprint::Lookup& campaigns,
-                 int64_t start,int64_t end,size_t width) {
-    Scanner scanner(source.chunk,width);
+template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const sprint::Lookup& products,const sprint::Lookup& campaigns,
+                 int64_t start,int64_t end) {
+    v6::Scanner<WIDTH> scanner(source.chunk.begin,source.chunk.end);
     sprint::DateCache cache;
     IngestCache ingest_cache;
     if (source.kind==EVENTS) {
         source.events.reserve((source.chunk.end-source.chunk.begin)/100);
-        while (scanner.more()) {
-            std::array<SV,7> f;
+        scanner.template run<7>([&](bool parsed,const std::array<SV,7>& f) {
             ++source.rows;
-            if (!scanner.next(f) || f[0].empty()) continue;
+            if (!parsed || f[0].empty()) return;
             if (source.events.size()>=UINT32_MAX) throw std::runtime_error("too many rows in CSV chunk");
             EventRow row{offset(source,f[0]),uint32_t(f[0].size()),offset(source,f[3]),
                 offset(source,f[1]),uint32_t(f[1].size()),UINT32_MAX,0};
@@ -204,25 +204,30 @@ inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,co
             uint64_t h=hash(f[0]);
             source.descriptors[h&(PARTS-1)].push_back({h,{index,uint32_t(source.events.size())}});
             source.events.push_back(row);
-        }
+        });
     } else if (source.kind==CLICKS) {
         source.clicks.reserve((source.chunk.end-source.chunk.begin)/64);
-        while (scanner.more()) {
-            std::array<SV,4> f; ++source.rows;
-            if (!scanner.next(f) || f[0].empty() || f[1].empty()) continue;
+        scanner.template run<4>([&](bool parsed,const std::array<SV,4>& f) {
+            ++source.rows;
+            if (!parsed || f[0].empty() || f[1].empty()) return;
             int64_t time; uint32_t campaign=campaigns.get(f[2],UINT32_MAX);
-            if (campaign==UINT32_MAX || !cache.parse(f[3],time) || time<start-WEEK || time>=end) continue;
+            if (campaign==UINT32_MAX || !cache.parse(f[3],time) || time<start-WEEK || time>=end) return;
             if (source.clicks.size()>=UINT32_MAX) throw std::runtime_error("too many clicks in chunk");
             source.clicks.push_back({offset(source,f[0]),uint32_t(f[0].size()),offset(source,f[1]),uint32_t(f[1].size()),
                 int32_t(time-start),campaign});
-        }
+        });
     } else {
-        while (scanner.more()) {
-            std::array<SV,2> f; ++source.rows;
-            if (!scanner.next(f) || f[0].empty() || f[1].empty()) continue;
+        scanner.template run<2>([&](bool parsed,const std::array<SV,2>& f) {
+            ++source.rows;
+            if (!parsed || f[0].empty() || f[1].empty()) return;
             source.links.push_back({offset(source,f[0]),uint32_t(f[0].size()),offset(source,f[1]),uint32_t(f[1].size())});
-        }
+        });
     }
+}
+inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,const sprint::Lookup& campaigns,
+                 int64_t start,int64_t end,size_t width) {
+    if (width==64) scan_width<64>(source,index,products,campaigns,start,end);
+    else scan_width<32>(source,index,products,campaigns,start,end);
 }
 struct SelectionStats { uint64_t descriptors=0,comparisons=0,duplicates=0; size_t largest=0; };
 inline SelectionStats select(std::vector<Source>& sources,size_t shard) {

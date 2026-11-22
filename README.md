@@ -1,4 +1,4 @@
-# Shopping Sessions v6 — exact native pipeline
+# Shopping Sessions v7 — exact native pipeline
 
 Submission-ready C++20 executable for [Shopping Sessions](https://www.joinbuilders.org/buildathon/tracks/shopping-sessions). No runtime network, Python, external libraries, bundled data, or cached answers. IDs are opaque exact bytes.
 
@@ -31,8 +31,7 @@ Polars/PyArrow are test-only. `BUILD_DIR` defaults to `build`; `NCPU` is capped 
 
 ## Engine
 
-- Fused immutable linked-ID lookup and worker-private exact singleton interning during input decoding; no separate all-row alias scatter/intern pass. Hardware CRC32 fingerprints retain full-byte collision checks.
-- Completed repeat-bit prefilter sends all repeated buckets to exact event selection; singleton hash buckets bypass table insertion without approximating dedup.
+- Restored v5 shard-owned identity and exact event-selection path after v6 scored slower (3.3s versus 2.9522s). No fused per-row identity lookup or CRC experiment in this release.
 - ISA-specialized whole-chunk scanner separates quote masks from comma/LF masks, removing per-vector indirect calls and transition overhead.
 - Successful production execution is silent. Diagnostic stage timing is compile-time opt-in (`-DSS_PROFILE=1`), absent from submitted image.
 - Persistent worker pool; LF-aligned mapped CSV chunks. Runtime AVX2/AVX-512F/BW dispatch, bounded loads at mapping ends, exact whole-field quote validation. CR and spaces remain data.
