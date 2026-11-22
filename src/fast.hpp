@@ -162,38 +162,45 @@ template<size_t N> bool csv_next(const char*& p,const char* end,std::array<SV,N>
     if (uint64_t(end-row)>UINT32_MAX) throw std::runtime_error("CSV row exceeds 4 GiB");
     return valid && count==N;
 }
+// The day digits identify distinct dates throughout any rolling 28 day window.
+inline unsigned day_slot(uint16_t tail) {
+    return ((tail & 3) << 4) | ((tail >> 8) & 15);
+}
 struct DateCache {
     struct Date { uint64_t head=0; uint16_t tail=0; int64_t midnight=0; };
-    std::array<Date,256> dates{};
+    std::array<Date,64> dates{};
     bool parse(SV s,int64_t& out) {
         if ((s.size()!=20 && s.size()!=25) || s[4]!='-') return timestamp(s,out);
+        uint64_t head; uint16_t tail;
+        std::memcpy(&head,s.data(),8); std::memcpy(&tail,s.data()+8,2);
+        auto& date=dates[day_slot(tail)];
+        bool hit=date.head==head && date.tail==tail;
+        if (!hit && !timestamp(s,out)) return false;
+
+        // XOR HH:MM:SS against 00:00:00. The two separator lanes must
+        // be zero, and the other six lanes have decimal upper bounds.
+        uint64_t clock;
+        std::memcpy(&clock,s.data()+11,sizeof(clock));
+        clock ^= 0x30303a30303a3030ULL;
+        constexpr uint64_t high_nibble=0xf0f0f0f0f0f0f0f0ULL;
+        constexpr uint64_t lane_bias=0x060a0f060a0f060dULL;
+        if ((clock & high_nibble) || ((clock+lane_bias) & high_nibble) || s[10]!='T') return false;
+        auto pair=[](uint64_t bits) { return unsigned(bits & 15)*10+unsigned(bits>>8 & 15); };
+        unsigned hour=pair(clock);
+        if (hour>=24) return false;
+        int64_t tod=(hour*3600+pair(clock>>24)*60+pair(clock>>48))*1000;
         int64_t offset=0;
-        if (s.size()==20) { if (s[19]!='Z') return false; }
-        else {
+        if (s.size()==20) {
+            if (s[19]!='Z') return false;
+        } else {
             if ((s[19]!='+' && s[19]!='-') || s[22]!=':') return false;
-            for (int i:{20,21,23,24}) if (s[i]<'0' || s[i]>'9') return false;
+            for (int i:{20,21,23,24}) if (unsigned(s[i]-'0')>9) return false;
             unsigned h=(s[20]-'0')*10+s[21]-'0',m=(s[23]-'0')*10+s[24]-'0';
             if (h>23 || m>59) return false;
             offset=int64_t(h*60+m)*60000*(s[19]=='+' ? 1 : -1);
         }
-        if (s[7]!='-' || s[10]!='T' || s[13]!=':' || s[16]!=':') return false;
-        __m128i bytes=_mm_loadu_si128(reinterpret_cast<const __m128i*>(s.data()));
-        auto valid=_mm_and_si128(_mm_cmpgt_epi8(bytes,_mm_set1_epi8('/')),
-                                _mm_cmpgt_epi8(_mm_set1_epi8(':'),bytes));
-        constexpr unsigned digits_mask=0xf | (3<<5) | (3<<8) | (3<<11) | (3<<14);
-        if ((unsigned(_mm_movemask_epi8(valid))&digits_mask)!=digits_mask ||
-            s[17]<'0' || s[17]>'9' || s[18]<'0' || s[18]>'9') return false;
-        auto two=[&](size_t i) { return unsigned(s[i]-'0')*10+unsigned(s[i+1]-'0'); };
-        unsigned h=two(11),m=two(14),sec=two(17);
-        if (h>23 || m>59 || sec>59) return false;
-        int64_t tod=(h*3600+m*60+sec)*1000;
-        uint64_t head; uint16_t tail;
-        std::memcpy(&head,s.data(),8); std::memcpy(&tail,s.data()+8,2);
-        auto& date=dates[mix(head^tail)&255];
-        if (date.head!=head || date.tail!=tail) {
-            if (!timestamp(s,out)) return false;
-            date={head,tail,out-tod+offset};
-        } else out=date.midnight+tod-offset;
+        if (!hit) date={head,tail,out-tod+offset};
+        else out=date.midnight+tod-offset;
         return true;
     }
 };

@@ -126,7 +126,7 @@ int main() {
         v5::scan(s,uint32_t(i),products,campaigns,1790812800000,1790812800000+DAY,32);
         assert(s.events.size()==1);
         for (auto& shard:s.descriptors) shard.clear();
-        s.descriptors[0].push_back({(uint64_t(1)<<63)|42,{uint32_t(i),0}}); sources.push_back(std::move(s));
+        s.descriptors[0].push_back({mix((uint64_t(1)<<63)|42),{uint32_t(i)|(uint32_t(1)<<31),0}}); sources.push_back(std::move(s));
     }
     auto stats=v5::select(sources,0);
     assert(stats.duplicates==2 && stats.descriptors==4);
@@ -146,13 +146,13 @@ int main() {
         assert(s.events.size()==1);
         uint64_t key=v5::event_key(v5::event_id(s,s.events[0]));
         for (auto& shard:s.descriptors) shard.clear();
-        s.descriptors[0].push_back({key,{i,0}}); short_sources.push_back(std::move(s));
+        s.descriptors[0].push_back({mix(key),{i,0}}); short_sources.push_back(std::move(s));
     }
     auto short_stats=v5::select(short_sources,0);
     assert(short_stats.descriptors==4 && short_stats.duplicates==1);
     assert(short_sources[0].events[0].time==UINT32_MAX && short_sources[3].events[0].time==UINT32_MAX);
     assert(short_sources[1].events[0].time==0 && short_sources[2].events[0].time==0);
-    // False repeat-bit hits stay distinct; an unflagged singleton also survives.
+    // Distinct mixed keys sharing a table slot survive linear probing.
     std::vector<std::string> distinct{
         "x,u1,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
         "y,u2,1790812800000,2026-10-01T00:00:01Z,view,p,ignored\n",
@@ -169,7 +169,7 @@ int main() {
     auto filtered=v5::select(false_hits,0);
     assert(filtered.descriptors==3 && filtered.duplicates==0);
     for (const auto& s:false_hits) assert(s.events[0].time==0);
-    // Force the cache-sized subpartition path; earliest invalid still wins across buckets.
+    // Exercise a large shard and the prefetch tail with an invalid earliest winner.
     std::string large_input;
     for (size_t i=0;i<40000;++i)
         large_input+="e"+std::to_string(i)+",u,1790812800000,2026-10-01T00:00:02Z,view,p,x\n";
@@ -180,7 +180,7 @@ int main() {
     assert(large[0].events.size()==40001);
     for (auto& shard:large[0].descriptors) shard.clear();
     for (uint32_t i=0;i<large[0].events.size();++i)
-        large[0].descriptors[0].push_back({v5::event_key(v5::event_id(large[0],large[0].events[i])),{0,i}});
+        large[0].descriptors[0].push_back({mix(v5::event_key(v5::event_id(large[0],large[0].events[i]))),{0,i}});
     auto large_stats=v5::select(large,0);
     assert(large_stats.descriptors==40001 && large_stats.duplicates==1);
     assert(large[0].events[123].time==UINT32_MAX && large[0].events.back().time==UINT32_MAX);

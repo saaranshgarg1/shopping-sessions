@@ -127,8 +127,14 @@ inline size_t vector_width() {
 }
 
 struct Ref { uint32_t source,row; };
-struct Descriptor { uint64_t hash; Ref ref; };
-struct AliasDescriptor { uint64_t key; Ref ref; };
+struct Descriptor {
+    static constexpr uint32_t SOURCE_MASK=UINT32_MAX>>1;
+    uint64_t hash;
+    Ref ref;
+    uint32_t source() const { return ref.source&SOURCE_MASK; }
+    bool needs_byte_comparison() const { return ref.source>SOURCE_MASK; }
+};
+struct AliasDescriptor { uint64_t key; uint32_t row, event_time; };
 static_assert(sizeof(Descriptor)==16 && sizeof(Ref)==8);
 struct EventRow {
     uint32_t id_offset,id_length,ingest_offset,user_offset,user_length,time,purchase;
@@ -156,24 +162,23 @@ inline uint32_t offset(const Source& source,SV field) {
 }
 inline SV event_id(const Source& source,const EventRow& row) { return view(source,row.id_offset,row.id_length); }
 struct IngestCache {
-    struct Date { uint64_t head=0; uint16_t tail=0; int64_t day=0; };
+    struct Date { uint64_t head=0; uint16_t tail=0; int64_t midnight=0; };
     std::array<Date,64> dates{};
     bool late(SV ingest,int64_t time,sprint::DateCache& cache) {
         if (ingest.size()!=20) throw std::runtime_error("invalid ingest_ts");
         uint64_t head; uint16_t tail;
         std::memcpy(&head,ingest.data(),8); std::memcpy(&tail,ingest.data()+8,2);
-        auto& date=dates[mix(head^tail)&63];
+        auto& date=dates[sprint::day_slot(tail)];
         int64_t parsed=0;
         if (date.head!=head || date.tail!=tail) {
             if (!cache.parse(ingest,parsed)) throw std::runtime_error("invalid ingest_ts");
-            date={head,tail,day_of(parsed)};
+            date={head,tail,day_of(parsed)*DAY};
         }
-        int64_t event_day=day_of(time);
-        if (date.day<=event_day) return false;
-        if (date.day>=event_day+2) return true;
+        if (time>=date.midnight) return false;
+        if (time<date.midnight-DAY) return true;
         auto two=[&](size_t i) { return (ingest[i]-'0')*10+ingest[i+1]-'0'; };
         int64_t tod=int64_t(two(11)*3600+two(14)*60+two(17))*1000;
-        return tod>time-event_day*DAY;
+        return date.midnight-DAY+tod>time;
     }
 };
 template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const sprint::Lookup& products,const sprint::Lookup& campaigns,
@@ -207,7 +212,9 @@ template<int WIDTH> inline void scan_width(Source& source,uint32_t index,const s
                 }
             }
             uint64_t key=event_key(f[0]);
-            source.descriptors[(mix(key)>>57)&(PARTS-1)].push_back({key,{index,uint32_t(source.events.size())}});
+            uint64_t mixed=mix(key);
+            uint32_t tagged_source=index | (uint32_t(key>>63)<<31);
+            source.descriptors[(mixed>>57)&(PARTS-1)].push_back({mixed,{tagged_source,uint32_t(source.events.size())}});
             source.events.push_back(row);
         });
     } else if (source.kind==CLICKS) {
@@ -236,40 +243,46 @@ inline void scan(Source& source,uint32_t index,const sprint::Lookup& products,co
 }
 struct SelectionStats { uint64_t descriptors=0,comparisons=0,duplicates=0; size_t largest=0; };
 inline SelectionStats select(std::vector<Source>& sources,size_t shard) {
-    std::vector<Descriptor> descriptors;
-    size_t count=0; for (const auto& s:sources) count+=s.descriptors[shard].size();
-    descriptors.reserve(count);
-    for (auto& s:sources) {
-        auto& block=s.descriptors[shard];
-        descriptors.insert(descriptors.end(),block.begin(),block.end());
-        std::vector<Descriptor>().swap(block);
-    }
+    size_t count=0;
+    for (const auto& source:sources) count+=source.descriptors[shard].size();
     SelectionStats stats{count,0,0,count};
     if (!count) return stats;
-    if (count>=UINT32_MAX) throw std::runtime_error("event shard exceeds 32-bit row count");
-    size_t capacity=16; while (capacity<count+count/2) capacity*=2;
-    struct Slot { uint64_t key=0; uint32_t winner=0; };
+    size_t capacity=16;
+    while (capacity<count+count/2) capacity*=2;
+    const size_t mask=capacity-1;
+    struct Slot { uint64_t key=0; Ref winner{}; };
     std::vector<Slot> table(capacity);
-    for (size_t i=0;i<count;++i) {
-        const auto& d=descriptors[i];
-        size_t at=mix(d.hash)&(capacity-1);
-        while (table[at].winner) {
-            if (d.hash==table[at].key) {
-                const auto& old_d=descriptors[table[at].winner-1];
-                auto& source=sources[d.ref.source]; auto& row=source.events[d.ref.row];
-                auto& old_source=sources[old_d.ref.source]; auto& old=old_source.events[old_d.ref.row];
-                ++stats.comparisons;
-                if (!(d.hash>>63) || event_id(source,row)==event_id(old_source,old)) {
-                    ++stats.duplicates;
-                    if (std::memcmp(source.chunk.begin+row.ingest_offset,old_source.chunk.begin+old.ingest_offset,20)<0) {
-                        old.time=UINT32_MAX; table[at].winner=uint32_t(i+1);
-                    } else row.time=UINT32_MAX;
-                    break;
+    for (auto& block_source:sources) {
+        auto& block=block_source.descriptors[shard];
+        for (size_t i=0;i<block.size();++i) {
+            constexpr size_t lookahead=12;
+            if (i+lookahead<block.size())
+                __builtin_prefetch(&table[block[i+lookahead].hash&mask],1,3);
+            const Descriptor& candidate=block[i];
+            size_t at=candidate.hash&mask;
+            while (table[at].winner.row) {
+                if (candidate.hash==table[at].key) {
+                    const Ref winner=table[at].winner;
+                    auto& source=sources[candidate.source()];
+                    auto& row=source.events[candidate.ref.row];
+                    auto& old_source=sources[winner.source];
+                    auto& old=old_source.events[winner.row-1];
+                    ++stats.comparisons;
+                    if (!candidate.needs_byte_comparison() || event_id(source,row)==event_id(old_source,old)) {
+                        ++stats.duplicates;
+                        if (std::memcmp(source.chunk.begin+row.ingest_offset,old_source.chunk.begin+old.ingest_offset,20)<0) {
+                            old.time=UINT32_MAX;
+                            table[at].winner={candidate.source(),candidate.ref.row+1};
+                        } else row.time=UINT32_MAX;
+                        break;
+                    }
                 }
+                at=(at+1)&mask;
             }
-            at=(at+1)&(capacity-1);
+            if (!table[at].winner.row)
+                table[at]={candidate.hash,{candidate.source(),candidate.ref.row+1}};
         }
-        if (!table[at].winner) table[at]={d.hash,uint32_t(i+1)};
+        std::vector<Descriptor>().swap(block);
     }
     return stats;
 }
@@ -300,7 +313,8 @@ struct IdShard {
     std::vector<RoutedEvent> events;
     std::vector<RoutedClick> clicks;
     std::vector<uint32_t> event_counts,click_counts;
-    std::vector<size_t> event_positions,click_positions;
+    std::vector<BinEvent*> event_positions;
+    std::vector<Click*> click_positions;
 };
 struct People {
     std::array<IdShard,PARTS> shards;
@@ -320,11 +334,14 @@ struct People {
         pool.run(sources.size(),[&](size_t j,size_t) {
             auto& s=sources[j];
             for (auto& bucket:s.aliases) bucket.reserve((s.events.size()+s.clicks.size()+s.links.size()*2)/PARTS+8);
-            auto add=[&](uint32_t row) {
+            auto add=[&](uint32_t row,uint32_t event_time=0) {
                 uint64_t key=alias_key(alias(s,row));
-                s.aliases[(mix(key)>>57)&(PARTS-1)].push_back({key,{uint32_t(j),row}});
+                s.aliases[(mix(key)>>57)&(PARTS-1)].push_back({key,row,event_time});
             };
-            if (s.kind==EVENTS) { for (uint32_t i=0;i<s.events.size();++i) if (s.events[i].time!=UINT32_MAX) add(i); }
+            if (s.kind==EVENTS) { for (uint32_t i=0;i<s.events.size();++i) if (s.events[i].time!=UINT32_MAX) {
+                const auto& event=s.events[i];
+                add(i,event.time | (event.purchase ? 0x80000000u : 0u));
+            } }
             else if (s.kind==CLICKS) { for (uint32_t i=0;i<s.clicks.size();++i) add(i); }
             else {
                 if (s.links.size()>=UINT32_MAX/2) throw std::runtime_error("too many links in chunk");
@@ -343,17 +360,20 @@ struct People {
             shard.packed.reserve(std::min<size_t>(count/24+64,65536));
             for (auto& s:sources) {
                 auto& refs=s.aliases[p];
+                const uint32_t source_index=uint32_t(&s-sources.data());
                 for (const auto& descriptor:refs) {
-                    auto ref=descriptor.ref; auto& owner=sources[ref.source];
                     if (shard.names.size()>=UINT32_MAX-1) throw std::runtime_error("alias shard exceeds 32-bit handles");
                     auto [v,added]=shard.packed.add(descriptor.key,uint32_t(shard.names.size()),
-                        [&](uint32_t previous) { return shard.names[previous]==alias(owner,ref.row); });
-                    if (added) { shard.names.push_back(alias(owner,ref.row)); shard.event_counts.push_back(0); shard.click_counts.push_back(0); }
-                    if (owner.kind==EVENTS) {
-                        const auto& event=owner.events[ref.row]; ++shard.event_counts[v];
-                        shard.events.push_back({v,event.time,event.purchase ? owner.purchase_base+event.purchase : 0});
-                    } else if (owner.kind==CLICKS) { ++shard.click_counts[v]; shard.clicks.push_back({v,ref}); }
-                    else handle(owner,ref.row,v,uint32_t(p));
+                        [&](uint32_t previous) { return shard.names[previous]==alias(s,descriptor.row); });
+                    if (added) { shard.names.push_back(alias(s,descriptor.row)); shard.event_counts.push_back(0); shard.click_counts.push_back(0); }
+                    if (s.kind==EVENTS) {
+                        ++shard.event_counts[v];
+                        const uint32_t purchase=(descriptor.event_time>>31) ? s.purchase_base+s.events[descriptor.row].purchase : 0;
+                        shard.events.push_back({v,descriptor.event_time&0x7fffffffu,purchase});
+                    } else if (s.kind==CLICKS) {
+                        ++shard.click_counts[v];
+                        shard.clicks.push_back({v,{source_index,descriptor.row}});
+                    } else handle(s,descriptor.row,v,uint32_t(p));
                 }
                 std::vector<AliasDescriptor>().swap(refs);
             }
@@ -434,7 +454,7 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
         for (auto chunk:chunks(maps)) { Source source{}; source.chunk=chunk; source.kind=kind; sources.push_back(std::move(source)); }
     };
     add(event_maps,EVENTS); add(click_maps,CLICKS); add(link_maps,LINKS);
-    if (sources.size()>=UINT32_MAX) throw std::runtime_error("too many CSV chunks");
+    if (sources.size()>Descriptor::SOURCE_MASK) throw std::runtime_error("too many CSV chunks");
     timing("map/catalog");
     pool.run(sources.size(),[&](size_t j,size_t) { scan(sources[j],uint32_t(j),products,campaigns,start,end,width); });
     timing("scan/validate");
@@ -471,27 +491,30 @@ inline bool run(const fs::path& data,const fs::path& output,size_t threads,int64
         for (uint32_t alias=0;alias<shard.event_counts.size();++alias) {
             uint32_t root=people.parent[shard.base+alias]; auto& group=groups[mix(root)&(PARTS-1)];
             uint32_t dense=people.dense[root];
-            shard.event_positions[alias]=group.event_positions[dense]; group.event_positions[dense]+=shard.event_counts[alias];
-            if (people.event_counts[root]) {
-                shard.click_positions[alias]=group.click_positions[dense]; group.click_positions[dense]+=shard.click_counts[alias];
+            if (shard.event_counts[alias]) {
+                shard.event_positions[alias]=group.events.data()+group.event_positions[dense];
+                group.event_positions[dense]+=shard.event_counts[alias];
+            }
+            if (people.event_counts[root] && shard.click_counts[alias]) {
+                shard.click_positions[alias]=group.clicks.data()+group.click_positions[dense];
+                group.click_positions[dense]+=shard.click_counts[alias];
             }
         }
     }
     pool.run(PARTS,[&](size_t p,size_t) {
         auto& shard=people.shards[p];
         for (const auto& event:shard.events) {
-            uint32_t root=people.parent[shard.base+event.user];
-            groups[mix(root)&(PARTS-1)].events[shard.event_positions[event.user]++]={event.time,event.purchase};
+            *shard.event_positions[event.user]++={event.time,event.purchase};
         }
         for (const auto& click:shard.clicks) {
-            uint32_t root=people.parent[shard.base+click.user];
-            if (!people.event_counts[root]) continue;
+            auto& target=shard.click_positions[click.user];
+            if (!target) continue;
             const auto& source=sources[click.ref.source]; const auto& row=source.clicks[click.ref.row];
-            groups[mix(root)&(PARTS-1)].clicks[shard.click_positions[click.user]++]={view(source,row.id_offset,row.id_length),row.time,row.campaign};
+            *target++={view(source,row.id_offset,row.id_length),row.time,row.campaign};
         }
         std::vector<RoutedEvent>().swap(shard.events); std::vector<RoutedClick>().swap(shard.clicks);
         std::vector<uint32_t>().swap(shard.event_counts); std::vector<uint32_t>().swap(shard.click_counts);
-        std::vector<size_t>().swap(shard.event_positions); std::vector<size_t>().swap(shard.click_positions);
+        std::vector<BinEvent*>().swap(shard.event_positions); std::vector<Click*>().swap(shard.click_positions);
     });
     timing("person-route");
     std::vector<std::vector<Stats>> counters(threads,std::vector<Stats>(catalog.campaigns.size()*days));
